@@ -1,0 +1,5 @@
+pandas>=2.0.0
+spotipy>=2.24.0
+ytmusicapi>=1.8.0
+python-dotenv>=1.0.0
+tqdm>=4.66.0

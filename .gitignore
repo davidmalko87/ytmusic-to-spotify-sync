@@ -1,0 +1,29 @@
+# Credentials
+.env
+browser.json
+oauth.json
+.cache-*
+
+# Data (personal playlists, sync state)
+data/
+*.csv
+!.env.example
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
