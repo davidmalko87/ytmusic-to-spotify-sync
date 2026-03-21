@@ -93,6 +93,32 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict]:
     return tracks
 
 
+def get_audio_features_batch(
+    sp: spotipy.Spotify,
+    track_ids: list[str],
+) -> dict[str, dict]:
+    """Fetch audio features for multiple tracks. Returns {track_id: features}.
+
+    Uses the single-track endpoint since GET /audio-features (batch) was
+    removed in Feb 2026. Rate-limited to avoid 429s.
+    """
+    features: dict[str, dict] = {}
+
+    for track_id in track_ids:
+        time.sleep(SEARCH_DELAY_SEC)
+        try:
+            result = sp.audio_features([track_id])
+            if result and result[0]:
+                features[track_id] = result[0]
+                logger.debug("Audio features for %s: tempo=%.1f, energy=%.2f",
+                             track_id, result[0].get("tempo", 0), result[0].get("energy", 0))
+        except spotipy.SpotifyException as e:
+            logger.warning("Failed to get audio features for %s: %s", track_id, e)
+
+    logger.info("Fetched audio features for %d/%d tracks", len(features), len(track_ids))
+    return features
+
+
 def add_tracks_to_playlist(
     sp: spotipy.Spotify,
     playlist_id: str,

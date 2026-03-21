@@ -27,6 +27,9 @@ ENRICHED_COLUMNS = [
     "duration", "addedDate", "addedBy", "url",
     "spotify_uri", "spotify_url", "spotify_duration_ms",
     "isrc_enriched", "explicit", "album_release_date",
+    "danceability", "energy", "valence", "tempo",
+    "key", "mode", "loudness", "speechiness",
+    "acousticness", "instrumentalness", "liveness", "time_signature",
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 
