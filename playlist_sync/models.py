@@ -33,6 +33,20 @@ class Track:
     explicit: bool = False
     album_release_date: str = ""
 
+    # Audio features (from Spotify audio_features API)
+    danceability: float = 0.0
+    energy: float = 0.0
+    valence: float = 0.0
+    tempo: float = 0.0
+    key: int = -1
+    mode: int = -1
+    loudness: float = 0.0
+    speechiness: float = 0.0
+    acousticness: float = 0.0
+    instrumentalness: float = 0.0
+    liveness: float = 0.0
+    time_signature: int = 0
+
     # Matching metadata
     match_method: str = ""
     match_confidence: float = 0.0
@@ -69,6 +83,18 @@ class Track:
             "isrc_enriched": self.isrc if self.isrc else "",
             "explicit": str(self.explicit).lower() if self.has_spotify_match else "",
             "album_release_date": self.album_release_date,
+            "danceability": f"{self.danceability:.4f}" if self.danceability else "",
+            "energy": f"{self.energy:.4f}" if self.energy else "",
+            "valence": f"{self.valence:.4f}" if self.valence else "",
+            "tempo": f"{self.tempo:.1f}" if self.tempo else "",
+            "key": str(self.key) if self.key >= 0 else "",
+            "mode": str(self.mode) if self.mode >= 0 else "",
+            "loudness": f"{self.loudness:.2f}" if self.loudness else "",
+            "speechiness": f"{self.speechiness:.4f}" if self.speechiness else "",
+            "acousticness": f"{self.acousticness:.4f}" if self.acousticness else "",
+            "instrumentalness": f"{self.instrumentalness:.4f}" if self.instrumentalness else "",
+            "liveness": f"{self.liveness:.4f}" if self.liveness else "",
+            "time_signature": str(self.time_signature) if self.time_signature else "",
             "match_method": self.match_method,
             "match_confidence": f"{self.match_confidence:.2f}" if self.match_confidence else "",
             "first_synced": self.first_synced,
@@ -94,6 +120,18 @@ class Track:
             spotify_duration_ms=int(row["spotify_duration_ms"]) if row.get("spotify_duration_ms") else 0,
             explicit=row.get("explicit", "").lower() == "true",
             album_release_date=row.get("album_release_date", ""),
+            danceability=float(row["danceability"]) if row.get("danceability") else 0.0,
+            energy=float(row["energy"]) if row.get("energy") else 0.0,
+            valence=float(row["valence"]) if row.get("valence") else 0.0,
+            tempo=float(row["tempo"]) if row.get("tempo") else 0.0,
+            key=int(row["key"]) if row.get("key") else -1,
+            mode=int(row["mode"]) if row.get("mode") else -1,
+            loudness=float(row["loudness"]) if row.get("loudness") else 0.0,
+            speechiness=float(row["speechiness"]) if row.get("speechiness") else 0.0,
+            acousticness=float(row["acousticness"]) if row.get("acousticness") else 0.0,
+            instrumentalness=float(row["instrumentalness"]) if row.get("instrumentalness") else 0.0,
+            liveness=float(row["liveness"]) if row.get("liveness") else 0.0,
+            time_signature=int(row["time_signature"]) if row.get("time_signature") else 0,
             match_method=row.get("match_method", ""),
             match_confidence=float(row["match_confidence"]) if row.get("match_confidence") else 0.0,
             first_synced=row.get("first_synced", ""),

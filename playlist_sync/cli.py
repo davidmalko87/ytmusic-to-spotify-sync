@@ -30,7 +30,7 @@ from playlist_sync.csv_manager import (
     write_unmatched_csv,
 )
 from playlist_sync.differ import diff_tracks
-from playlist_sync.enricher import apply_match_to_track
+from playlist_sync.enricher import apply_match_to_track, enrich_with_audio_features
 from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
 from playlist_sync.spotify_client import (
@@ -305,7 +305,12 @@ def cmd_sync(args: argparse.Namespace) -> None:
             action = "[DRY RUN] Would remove" if args.dry_run else "Removed"
             print(f"{action} {removed} tracks from Spotify playlist")
 
-    # Step 7: Save outputs
+    # Step 7: Fetch audio features for newly matched tracks
+    if already_matched and not args.dry_run:
+        print("\nFetching audio features...")
+        enrich_with_audio_features(sp, already_matched)
+
+    # Step 8: Save outputs
     if not args.dry_run:
         all_tracks = already_matched + unmatched_tracks
         write_enriched_csv(all_tracks)

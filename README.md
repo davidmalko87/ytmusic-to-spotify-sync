@@ -13,6 +13,7 @@ A command-line tool that reads your YT Music playlist (via API or CSV export), f
 - **Smart 3-pass matching** — ISRC → title+artist → fuzzy search with duration validation
 - **Diff-based sync** — only processes added/removed tracks since the last snapshot
 - **Spotify playlist sync** — adds matched tracks, removes deleted ones automatically
+- **Audio features** — danceability, energy, valence, tempo, key, loudness, and more
 - **Metadata enrichment** — captures ISRC, release date, explicit flag for every track
 - **CSV fallback** — works with CSV exports if you prefer not to use the YT Music API
 - **Interactive menu** — run without arguments for a guided experience
@@ -178,13 +179,33 @@ The sync produces `data/playlist_enriched.csv` with these columns:
 | `trackId`, `url`, `duration` | YT Music |
 | `spotify_uri`, `spotify_url` | Spotify match |
 | `isrc`, `explicit`, `album_release_date` | Spotify metadata |
+| `danceability`, `energy`, `valence` | Spotify audio features |
+| `tempo`, `key`, `mode`, `loudness` | Spotify audio features |
+| `speechiness`, `acousticness` | Spotify audio features |
+| `instrumentalness`, `liveness` | Spotify audio features |
+| `time_signature` | Spotify audio features |
 | `match_method`, `match_confidence` | Matching info |
 | `first_synced`, `last_synced` | Sync timestamps |
 
+### Audio features explained
+
+| Feature | Range | Meaning |
+|---------|-------|---------|
+| `danceability` | 0.0 - 1.0 | How suitable for dancing (tempo, rhythm, beat) |
+| `energy` | 0.0 - 1.0 | Intensity and activity (loud, fast, noisy = high) |
+| `valence` | 0.0 - 1.0 | Musical positiveness (happy = high, sad = low) |
+| `tempo` | BPM | Estimated beats per minute |
+| `speechiness` | 0.0 - 1.0 | Presence of spoken words |
+| `acousticness` | 0.0 - 1.0 | Confidence the track is acoustic |
+| `instrumentalness` | 0.0 - 1.0 | Predicts no vocal content |
+| `liveness` | 0.0 - 1.0 | Presence of a live audience |
+| `loudness` | dB | Overall loudness (typically -60 to 0) |
+| `key` | 0-11 | Pitch class (0=C, 1=C#, 2=D, ..., 11=B) |
+| `mode` | 0 or 1 | Modality (0=minor, 1=major) |
+
 ## Known Limitations
 
-- **Spotify audio features API is deprecated** (Feb 2026) — danceability, energy, tempo etc. are no longer available via API. The tool enriches with available metadata (ISRC, release date, explicit flag).
-- **Spotify Dev Mode** limits search to 10 results per request. The tool works within this limit.
+- **Spotify Dev Mode** limits search to 10 results per request and requires Premium. The tool works within these limits.
 - **YT Music-exclusive tracks** (unreleased, region-locked, user uploads) won't have Spotify matches — these are tracked in `unmatched.csv`.
 - **ytmusicapi OAuth is broken** in v1.11.x — the tool uses browser authentication instead (stable, valid ~2 years).
 
