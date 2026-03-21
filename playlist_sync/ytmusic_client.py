@@ -52,7 +52,8 @@ def setup_browser_auth(output_path: str = "browser.json") -> None:
         return
 
     headers_raw = "\n".join(lines)
-    YTMusic.setup(filepath=output_path, headers_raw=headers_raw)
+    import ytmusicapi
+    ytmusicapi.setup(filepath=output_path, headers_raw=headers_raw)
     print(f"\nAuth saved to {output_path}")
     print("This is valid for ~2 years unless you log out of YT Music.")
 
