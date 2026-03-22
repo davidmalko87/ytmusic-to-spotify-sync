@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from playlist_sync.config import (
     ENRICHED_CSV,
+    MATCH_CACHE,
     SNAPSHOTS_DIR,
     UNMATCHED_CSV,
     ensure_dirs,
@@ -34,6 +35,7 @@ from playlist_sync.enricher import apply_match_to_track, enrich_with_audio_featu
 from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
 from playlist_sync.spotify_client import (
+    RateLimitError,
     add_tracks_to_playlist,
     get_spotify_client,
     remove_tracks_from_playlist,
@@ -118,6 +120,37 @@ def interactive_menu() -> None:
         args.from_csv = "default"
 
     dispatch(args)
+
+
+# ── Match cache for resume after rate limits ────────────────────────
+
+def _load_match_cache() -> dict[str, dict]:
+    """Load cached match results from previous interrupted runs."""
+    import json
+    if MATCH_CACHE.exists():
+        try:
+            data = json.loads(MATCH_CACHE.read_text(encoding="utf-8"))
+            print(f"Resuming: loaded {len(data)} cached matches from previous run")
+            return data
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {}
+
+
+def _save_match_cache(cache: dict[str, dict]) -> None:
+    """Save match results so we can resume after rate limits."""
+    import json
+    ensure_dirs()
+    MATCH_CACHE.write_text(
+        json.dumps(cache, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _clear_match_cache() -> None:
+    """Remove match cache after successful sync."""
+    if MATCH_CACHE.exists():
+        MATCH_CACHE.unlink()
 
 
 # ── Command handlers ────────────────────────────────────────────────
@@ -265,21 +298,75 @@ def cmd_sync(args: argparse.Namespace) -> None:
             save_snapshot(current)
         return
 
-    # Step 5: Match new tracks
+    # Step 5: Match new tracks (with resume support)
     sp = get_spotify_client(config)
     matched_results = []
     unmatched_tracks: list[Track] = []
+    match_cache = _load_match_cache()
 
     if needs_matching:
-        print(f"\nMatching {len(needs_matching)} tracks to Spotify...")
-        for track in tqdm(needs_matching, desc="Matching", unit="track"):
-            result = match_track(sp, track)
-            if result.matched:
-                enriched_track = apply_match_to_track(track, result)
-                already_matched.append(enriched_track)
-                matched_results.append(result)
+        # Skip tracks already in cache from previous interrupted run
+        to_search: list[Track] = []
+        for track in needs_matching:
+            fp = track.fingerprint
+            if fp in match_cache:
+                cached = match_cache[fp]
+                if cached.get("matched"):
+                    from playlist_sync.models import MatchResult
+                    result = MatchResult(
+                        source_track=track,
+                        spotify_uri=cached["spotify_uri"],
+                        spotify_url=cached.get("spotify_url", ""),
+                        method=cached.get("method", "cached"),
+                        confidence=cached.get("confidence", 0.0),
+                    )
+                    enriched_track = apply_match_to_track(track, result)
+                    already_matched.append(enriched_track)
+                    matched_results.append(result)
+                else:
+                    unmatched_tracks.append(track)
             else:
-                unmatched_tracks.append(track)
+                to_search.append(track)
+
+        if to_search:
+            cached_count = len(needs_matching) - len(to_search)
+            if cached_count > 0:
+                print(f"Restored {cached_count} matches from cache")
+            print(f"\nMatching {len(to_search)} tracks to Spotify...")
+
+            try:
+                for track in tqdm(to_search, desc="Matching", unit="track"):
+                    result = match_track(sp, track)
+                    fp = track.fingerprint
+                    if result.matched:
+                        enriched_track = apply_match_to_track(track, result)
+                        already_matched.append(enriched_track)
+                        matched_results.append(result)
+                        match_cache[fp] = {
+                            "matched": True,
+                            "spotify_uri": result.spotify_uri,
+                            "spotify_url": result.spotify_url,
+                            "method": result.method,
+                            "confidence": result.confidence,
+                        }
+                    else:
+                        unmatched_tracks.append(track)
+                        match_cache[fp] = {"matched": False}
+
+                    # Save cache every 50 tracks for safety
+                    if len(match_cache) % 50 == 0:
+                        _save_match_cache(match_cache)
+
+            except RateLimitError as e:
+                _save_match_cache(match_cache)
+                matched_so_far = len(matched_results)
+                remaining = len(to_search) - matched_so_far
+                hrs = e.retry_after / 3600
+                print(f"\n\nRate limited! Progress saved ({matched_so_far} matched).")
+                print(f"Remaining: {remaining} tracks")
+                print(f"Wait ~{hrs:.1f}h then re-run: python playlist_sync.py sync")
+                print("Your progress will be restored automatically.")
+                return
 
         print(f"Matched: {len(matched_results)}, Unmatched: {len(unmatched_tracks)}")
 
@@ -323,6 +410,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         save_snapshot(current)
         print("Snapshot updated.")
 
+    _clear_match_cache()
     print("\nSync complete!")
 
 

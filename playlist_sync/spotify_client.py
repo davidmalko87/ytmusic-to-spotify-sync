@@ -38,6 +38,26 @@ def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
     return sp
 
 
+class RateLimitError(Exception):
+    """Raised when Spotify rate limit is hit and retry wait is too long."""
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(f"Rate limited. Retry after {retry_after}s")
+
+
+def _handle_rate_limit(e: spotipy.SpotifyException) -> None:
+    """Handle 429 rate limit errors with short backoff or raise if too long."""
+    retry_after = int(e.headers.get("Retry-After", 60)) if e.headers else 60
+
+    if retry_after <= 30:
+        # Short wait — just pause and retry
+        logger.warning("Rate limited, waiting %ds...", retry_after)
+        time.sleep(retry_after + 1)
+    else:
+        # Long wait — save progress and stop
+        raise RateLimitError(retry_after)
+
+
 def search_track(
     sp: spotipy.Spotify,
     query: str,
@@ -49,14 +69,20 @@ def search_track(
 
     time.sleep(SEARCH_DELAY_SEC)
 
-    try:
-        results = sp.search(q=query, type="track", limit=limit)
-        items = results.get("tracks", {}).get("items", [])
-        logger.debug("Search '%s' -> %d results", query[:60], len(items))
-        return items
-    except spotipy.SpotifyException as e:
-        logger.warning("Spotify search failed for '%s': %s", query[:60], e)
-        return []
+    for attempt in range(3):
+        try:
+            results = sp.search(q=query, type="track", limit=limit)
+            items = results.get("tracks", {}).get("items", [])
+            logger.debug("Search '%s' -> %d results", query[:60], len(items))
+            return items
+        except spotipy.SpotifyException as e:
+            if e.http_status == 429:
+                _handle_rate_limit(e)
+                continue
+            logger.warning("Spotify search failed for '%s': %s", query[:60], e)
+            return []
+
+    return []
 
 
 def search_by_isrc(sp: spotipy.Spotify, isrc: str) -> list[dict]:

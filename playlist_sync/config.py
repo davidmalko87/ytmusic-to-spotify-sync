@@ -41,7 +41,12 @@ SPOTIFY_PLAYLIST_BATCH = 100
 SPOTIFY_SEARCH_LIMIT = 10
 
 # Rate limiting (seconds between Spotify searches)
-SEARCH_DELAY_SEC = 0.1
+# Spotify Dev Mode has strict limits (~180 requests/min).
+# 0.5s delay keeps us safely under the limit.
+SEARCH_DELAY_SEC = 0.5
+
+# Match cache file for resuming after rate limits
+MATCH_CACHE = DATA_DIR / "match_cache.json"
 
 
 def load_config() -> dict[str, str]:
