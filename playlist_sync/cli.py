@@ -447,7 +447,9 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
         uris = [t.spotify_uri for t in newly_matched]
         add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris)
 
-        existing = read_enriched_csv()
+        # Replace existing unmatched entries with the newly matched versions
+        newly_matched_fps = {t.fingerprint for t in newly_matched}
+        existing = [t for t in read_enriched_csv() if t.fingerprint not in newly_matched_fps]
         existing.extend(newly_matched)
         write_enriched_csv(existing)
 

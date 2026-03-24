@@ -96,31 +96,3 @@ def enrich_with_audio_features(
 
     logger.info("Applied audio features to %d/%d tracks", enriched_count, len(track_id_map))
     return tracks
-
-
-def enrich_tracks(
-    tracks: list[Track],
-    match_results: list[MatchResult],
-) -> tuple[list[Track], list[Track]]:
-    """Apply match results to tracks. Returns (enriched, unmatched) lists."""
-    result_map = {r.source_track.fingerprint: r for r in match_results}
-
-    enriched: list[Track] = []
-    unmatched: list[Track] = []
-
-    for track in tracks:
-        result = result_map.get(track.fingerprint)
-        if result and result.matched:
-            enriched.append(apply_match_to_track(track, result))
-        else:
-            unmatched.append(track)
-
-    matched_count = len(enriched)
-    total = len(tracks)
-    rate = (matched_count / total * 100) if total else 0
-    logger.info(
-        "Enrichment: %d/%d matched (%.1f%%), %d unmatched",
-        matched_count, total, rate, len(unmatched),
-    )
-
-    return enriched, unmatched
