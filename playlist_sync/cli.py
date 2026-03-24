@@ -353,8 +353,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
                         unmatched_tracks.append(track)
                         match_cache[fp] = {"matched": False}
 
-                    # Save cache every 50 tracks for safety
-                    if len(match_cache) % 50 == 0:
+                    # Save cache every 25 tracks for safety
+                    if len(match_cache) % 25 == 0:
                         _save_match_cache(match_cache)
 
             except RateLimitError as e:
