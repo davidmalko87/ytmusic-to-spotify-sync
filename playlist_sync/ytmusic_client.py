@@ -18,9 +18,77 @@ from playlist_sync.models import Track
 logger = logging.getLogger("playlist_sync")
 
 
+# Headers that ytmusicapi actually needs for browser auth
+_REQUEST_HEADER_NAMES = {
+    "cookie", "authorization", "origin", "user-agent",
+    "x-goog-authuser", "x-goog-visitor-id", "x-origin",
+    "x-youtube-client-name", "x-youtube-client-version",
+    "content-type", "referer", "accept", "accept-language",
+    "accept-encoding",
+}
+
+# Lines from Chrome DevTools that are NOT request headers
+_SKIP_PREFIXES = {
+    "request url", "request method", "status code", "remote address",
+    "referrer policy", "alt-svc", "content-length", "date", "server",
+    "vary", "x-content-type-options", "x-frame-options", "x-xss-protection",
+    ":authority", ":method", ":path", ":scheme", "decoded:",
+    "message clientvariations", "//", "repeated int32", "}",
+    "priority", "sec-ch-ua", "sec-fetch", "x-browser-channel",
+    "x-browser-copyright", "x-browser-validation", "x-browser-year",
+    "x-client-data", "x-youtube-bootstrap",
+}
+
+
+def _normalize_chrome_headers(lines: list[str]) -> str:
+    """Convert Chrome DevTools header format to 'key: value' format.
+
+    Chrome shows headers as two separate lines:
+        cookie
+        VISITOR_INFO1_LIVE=abc; ...
+    ytmusicapi expects:
+        cookie: VISITOR_INFO1_LIVE=abc; ...
+    """
+    # First check if headers are already in "key: value" format
+    colon_lines = [l for l in lines if ": " in l and not l.startswith("//")]
+    if len(colon_lines) > len(lines) // 2:
+        # Already in standard format, just pass through
+        return "\n".join(lines)
+
+    # Parse Chrome's two-line format: key on one line, value on the next
+    headers: dict[str, str] = {}
+    i = 0
+    while i < len(lines):
+        key = lines[i].strip().lower()
+
+        # Skip empty lines and known non-request-header lines
+        if not key or any(key.startswith(p) for p in _SKIP_PREFIXES):
+            i += 1
+            continue
+
+        # Check if this is a known request header name
+        if key in _REQUEST_HEADER_NAMES and i + 1 < len(lines):
+            value = lines[i + 1].strip()
+            # Make sure value doesn't look like another header name
+            if value and value.lower() not in _REQUEST_HEADER_NAMES:
+                headers[key] = value
+                i += 2
+                continue
+
+        i += 1
+
+    if not headers:
+        # Fallback: return raw input and let ytmusicapi try to parse it
+        return "\n".join(lines)
+
+    # Build standard format
+    result_lines = [f"{k}: {v}" for k, v in headers.items()]
+    return "\n".join(result_lines)
+
+
 def setup_browser_auth(output_path: str = "browser.json") -> None:
     """Interactive setup for browser-based authentication."""
-    from ytmusicapi import YTMusic
+    import ytmusicapi
 
     print("=" * 60)
     print("YT Music Browser Authentication Setup")
@@ -29,11 +97,14 @@ def setup_browser_auth(output_path: str = "browser.json") -> None:
     print("Steps:")
     print("1. Open https://music.youtube.com in your browser (logged in)")
     print("2. Open DevTools (F12 or Ctrl+Shift+I)")
-    print("3. Go to Network tab")
-    print("4. Filter by '/browse'")
-    print("5. Click any POST request with status 200")
-    print("6. Copy ALL request headers")
-    print("7. Paste below, then press Enter on an empty line")
+    print("3. Go to Network tab, filter by '/browse'")
+    print("4. Click on any page in YT Music to trigger requests")
+    print("5. Click a POST request with status 200")
+    print("6. Go to Headers tab, scroll to 'Request Headers'")
+    print("7. Copy ONLY the Request Headers section (not General/Response)")
+    print("8. Paste below, then press Enter on an empty line")
+    print()
+    print("Note: Both Chrome two-line format and 'key: value' format work.")
     print()
 
     lines: list[str] = []
@@ -51,8 +122,7 @@ def setup_browser_auth(output_path: str = "browser.json") -> None:
         print("No headers provided. Aborting.")
         return
 
-    headers_raw = "\n".join(lines)
-    import ytmusicapi
+    headers_raw = _normalize_chrome_headers(lines)
     ytmusicapi.setup(filepath=output_path, headers_raw=headers_raw)
     print(f"\nAuth saved to {output_path}")
     print("This is valid for ~2 years unless you log out of YT Music.")
