@@ -163,11 +163,14 @@ def fetch_playlist_tracks(
         if item.get("duration_seconds"):
             duration_sec = float(item["duration_seconds"])
         elif item.get("duration"):
-            parts = str(item["duration"]).split(":")
-            if len(parts) == 2:
-                duration_sec = int(parts[0]) * 60 + int(parts[1])
-            elif len(parts) == 3:
-                duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            try:
+                parts = str(item["duration"]).split(":")
+                if len(parts) == 2:
+                    duration_sec = int(parts[0]) * 60 + int(parts[1])
+                elif len(parts) == 3:
+                    duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except (ValueError, IndexError):
+                logger.debug("Could not parse duration '%s' for track '%s'", item["duration"], item.get("title", ""))
 
         video_id = item.get("videoId", "")
 
