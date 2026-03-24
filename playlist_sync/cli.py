@@ -332,6 +332,12 @@ def cmd_sync(args: argparse.Namespace) -> None:
             cached_count = len(needs_matching) - len(to_search)
             if cached_count > 0:
                 print(f"Restored {cached_count} matches from cache")
+
+            limit = getattr(args, "limit", None)
+            if limit and len(to_search) > limit:
+                print(f"Limiting to {limit} tracks this run ({len(to_search) - limit} remaining for next run)")
+                to_search = to_search[:limit]
+
             print(f"\nMatching {len(to_search)} tracks to Spotify...")
 
             try:
@@ -411,7 +417,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
         print("Snapshot updated.")
 
     _clear_match_cache()
-    print("\nSync complete!")
+
+    limit = getattr(args, "limit", None)
+    total_still_pending = len(current) - len(already_matched) - len(matched_results) - len(unmatched_tracks)
+    if limit and total_still_pending > 0:
+        print(f"\nPartial sync complete. {total_still_pending} tracks still need matching.")
+        print(f"Re-run tomorrow: python playlist_sync.py sync --limit {limit}")
+    else:
+        print("\nSync complete!")
 
 
 def cmd_retry_unmatched(args: argparse.Namespace) -> None:
@@ -539,6 +552,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument(
         "--from-csv", nargs="?", const="default",
         help="Sync from CSV instead of YT Music API",
+    )
+    p_sync.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="Max new tracks to match per run (use to stay within Spotify's daily API quota)",
     )
 
     p_retry = sub.add_parser("retry-unmatched", help="Re-attempt matching for unmatched tracks")
