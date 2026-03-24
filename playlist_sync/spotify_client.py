@@ -49,12 +49,12 @@ def _handle_rate_limit(e: spotipy.SpotifyException) -> None:
     """Handle 429 rate limit errors with short backoff or raise if too long."""
     retry_after = int(e.headers.get("Retry-After", 60)) if e.headers else 60
 
-    if retry_after <= 30:
-        # Short wait — just pause and retry
+    if retry_after <= 120:
+        # Manageable wait — just pause and retry
         logger.warning("Rate limited, waiting %ds...", retry_after)
         time.sleep(retry_after + 1)
     else:
-        # Long wait — save progress and stop
+        # Multi-hour wait — save progress and stop
         raise RateLimitError(retry_after)
 
 

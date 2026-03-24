@@ -41,9 +41,10 @@ SPOTIFY_PLAYLIST_BATCH = 100
 SPOTIFY_SEARCH_LIMIT = 10
 
 # Rate limiting (seconds between Spotify searches)
-# Spotify Dev Mode has strict limits (~180 requests/min).
-# 0.5s delay keeps us safely under the limit.
-SEARCH_DELAY_SEC = 0.5
+# Spotify Dev Mode has strict per-minute and daily quotas.
+# For large playlists (1000+ tracks) 0.5s is too aggressive and triggers
+# 24-hour bans. 1.5s (~40 req/min) is a safe conservative rate.
+SEARCH_DELAY_SEC = 1.5
 
 # Match cache file for resuming after rate limits
 MATCH_CACHE = DATA_DIR / "match_cache.json"
