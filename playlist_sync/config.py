@@ -87,7 +87,7 @@ def require_spotify_config(config: dict[str, str]) -> None:
     ]
     if missing:
         print(f"Error: missing required env vars: {', '.join(missing)}")
-        print(f"Copy .env.example to .env and fill in your credentials.")
+        print("Copy .env.example to .env and fill in your credentials.")
         sys.exit(1)
 
 

@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report a bug or unexpected behaviour
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as possible.
+
+  - type: input
+    id: version
+    attributes:
+      label: Tool version
+      description: Run `python -c "import playlist_sync; print(playlist_sync.__version__)"` and paste the output.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Run `python --version` and paste the output.
+      placeholder: "Python 3.12.2"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04 / macOS 14.4 / Windows 11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the exact commands and actions that trigger the bug.
+      placeholder: |
+        1. Run `python playlist_sync.py sync --dry-run`
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: |
+        Paste the full terminal output. Run with `--verbose` for more detail.
+        Redact any credentials or personal data before pasting.
+      render: text

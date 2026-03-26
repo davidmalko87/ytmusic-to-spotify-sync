@@ -11,6 +11,10 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ytmusicapi import YTMusic
 
 from playlist_sync.config import SNAPSHOTS_DIR, ensure_dirs
 from playlist_sync.models import Track
@@ -50,7 +54,7 @@ def _normalize_chrome_headers(lines: list[str]) -> str:
         cookie: VISITOR_INFO1_LIVE=abc; ...
     """
     # First check if headers are already in "key: value" format
-    colon_lines = [l for l in lines if ": " in l and not l.startswith("//")]
+    colon_lines = [line for line in lines if ": " in line and not line.startswith("//")]
     if len(colon_lines) > len(lines) // 2:
         # Already in standard format, just pass through
         return "\n".join(lines)
@@ -88,8 +92,6 @@ def _normalize_chrome_headers(lines: list[str]) -> str:
 
 def setup_browser_auth(output_path: str = "browser.json") -> None:
     """Interactive setup for browser-based authentication."""
-    from ytmusicapi import YTMusic
-
     print("=" * 60)
     print("YT Music Browser Authentication Setup")
     print("=" * 60)
@@ -129,7 +131,7 @@ def setup_browser_auth(output_path: str = "browser.json") -> None:
     print("This is valid for ~2 years unless you log out of YT Music.")
 
 
-def get_ytmusic_client(auth_file: str) -> "YTMusic":
+def get_ytmusic_client(auth_file: str) -> YTMusic:
     """Create an authenticated YTMusic client."""
     from ytmusicapi import YTMusic
     return YTMusic(auth_file)

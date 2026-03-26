@@ -1,0 +1,49 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please describe it as clearly as possible.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem this solves
+      description: What limitation or friction does this feature address?
+      placeholder: "Currently there is no way to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the change you would like to see. Include example commands or output if applicable.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area affected
+      options:
+        - Track matching
+        - Spotify sync
+        - YT Music integration
+        - CSV import/export
+        - Audio features / enrichment
+        - CLI / interactive menu
+        - Configuration
+        - Documentation
+        - CI / project tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you considered any workarounds or alternative approaches?
