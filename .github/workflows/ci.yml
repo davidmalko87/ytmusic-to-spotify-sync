@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint-and-verify:
+    name: Lint & verify (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Verify package imports and entry point
+        run: |
+          python -c "import playlist_sync; print('version:', playlist_sync.__version__)"
+          python -c "from playlist_sync.cli import build_parser; build_parser()"
+          python -c "from playlist_sync.config import load_config"
+          python -c "from playlist_sync.models import Track, MatchResult, DiffResult"
+          python -c "from playlist_sync.matcher import match_track"
+          python -c "from playlist_sync.differ import diff_tracks"

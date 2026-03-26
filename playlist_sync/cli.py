@@ -164,7 +164,7 @@ def cmd_setup_ytmusic(args: argparse.Namespace) -> None:
 
 def cmd_import_csv(args: argparse.Namespace) -> None:
     """Bootstrap from existing playlist CSV export."""
-    log = setup_logging(args.verbose)
+    setup_logging(args.verbose)
     config = load_config()
     ensure_dirs()
 
@@ -198,7 +198,7 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
 
 def cmd_snapshot(args: argparse.Namespace) -> None:
     """Snapshot current YT Music playlist state via API."""
-    log = setup_logging(args.verbose)
+    setup_logging(args.verbose)
     config = load_config()
     require_ytmusic_config(config)
     ensure_dirs()
@@ -216,7 +216,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
 
 def cmd_diff(args: argparse.Namespace) -> None:
     """Show changes since last snapshot."""
-    log = setup_logging(args.verbose)
+    setup_logging(args.verbose)
     config = load_config()
     require_ytmusic_config(config)
 
@@ -249,7 +249,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
 def cmd_sync(args: argparse.Namespace) -> None:
     """Full sync: diff -> match -> push to Spotify + enrich."""
-    log = setup_logging(args.verbose)
+    setup_logging(args.verbose)
     config = load_config()
     require_spotify_config(config)
     ensure_dirs()
@@ -429,7 +429,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
 def cmd_retry_unmatched(args: argparse.Namespace) -> None:
     """Re-attempt matching for previously unmatched tracks."""
-    log = setup_logging(args.verbose)
+    setup_logging(args.verbose)
     config = load_config()
     require_spotify_config(config)
 
@@ -487,7 +487,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         tracks = read_source_csv(source)
         print(f"Source CSV:    {len(tracks)} tracks ({source.name})")
     else:
-        print(f"Source CSV:    not configured (set SOURCE_CSV in .env)")
+        print("Source CSV:    not configured (set SOURCE_CSV in .env)")
 
     # Enriched CSV
     if ENRICHED_CSV.exists():
@@ -508,7 +508,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 for method, count in sorted(methods.items(), key=lambda x: -x[1]):
                     print(f"  {method}: {count}")
     else:
-        print(f"Enriched CSV: not yet created")
+        print("Enriched CSV: not yet created")
 
     # Unmatched
     if UNMATCHED_CSV.exists():
@@ -521,7 +521,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     if snapshots:
         print(f"Snapshots:    {len(snapshots)} (latest: {snapshots[-1].name})")
     else:
-        print(f"Snapshots:    none")
+        print("Snapshots:    none")
 
 
 # ── CLI parser ──────────────────────────────────────────────────────
