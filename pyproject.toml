@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytmusic-to-spotify-sync"
+version = "0.4.0"
+description = "Automatically sync your YouTube Music playlists to Spotify with smart track matching, diff-based updates, and metadata enrichment"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "David Malko", email = "davidmalko87@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["youtube-music", "spotify", "playlist", "sync", "music", "ytmusic", "spotify-api"]
+dependencies = [
+    "pandas>=2.0.0",
+    "spotipy>=2.24.0",
+    "ytmusicapi>=1.8.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.66.0",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/davidmalko87/ytmusic-to-spotify-sync"
+Repository = "https://github.com/davidmalko87/ytmusic-to-spotify-sync"
+Changelog = "https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/davidmalko87/ytmusic-to-spotify-sync/issues"
+
+[project.scripts]
+ytmusic-sync = "playlist_sync.cli:main"
