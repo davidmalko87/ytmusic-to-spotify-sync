@@ -127,8 +127,13 @@ def get_audio_features_batch(
 
     Uses the single-track endpoint since GET /audio-features (batch) was
     removed in Feb 2026. Rate-limited to avoid 429s.
+
+    If the endpoint returns 403 (access removed for this app type), logs a
+    warning and returns an empty dict immediately rather than retrying for
+    every track.
     """
     features: dict[str, dict] = {}
+    consecutive_403s = 0
 
     for track_id in track_ids:
         time.sleep(SEARCH_DELAY_SEC)
@@ -138,7 +143,18 @@ def get_audio_features_batch(
                 features[track_id] = result[0]
                 logger.debug("Audio features for %s: tempo=%.1f, energy=%.2f",
                              track_id, result[0].get("tempo", 0), result[0].get("energy", 0))
+            consecutive_403s = 0
         except spotipy.SpotifyException as e:
+            if e.http_status == 403:
+                consecutive_403s += 1
+                if consecutive_403s >= 3:
+                    logger.warning(
+                        "Audio features endpoint returned 403 three times in a row. "
+                        "Spotify has restricted this endpoint for your app type. Skipping."
+                    )
+                    break
+            else:
+                consecutive_403s = 0
             logger.warning("Failed to get audio features for %s: %s", track_id, e)
 
     logger.info("Fetched audio features for %d/%d tracks", len(features), len(track_ids))
