@@ -322,7 +322,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
                     )
                     enriched_track = apply_match_to_track(track, result)
                     already_matched.append(enriched_track)
-                    matched_results.append(result)
+                    # Do NOT append to matched_results here — these tracks are
+                    # already in the Spotify playlist from a previous run.
+                    # Only newly searched tracks should be added again.
                 else:
                     unmatched_tracks.append(track)
             else:
