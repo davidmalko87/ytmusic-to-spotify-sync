@@ -3,7 +3,7 @@
 > Automatically sync your YouTube Music playlists to Spotify — with smart track matching, diff-based updates, and full metadata enrichment.
 
 [![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
@@ -27,11 +27,12 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 | **Diff-based sync** | JSON snapshots track playlist state; only added/removed tracks are touched each run |
 | **Spotify playlist management** | Adds new matches and removes deleted tracks automatically |
 | **Audio features enrichment** | Annotates every track with danceability, energy, valence, tempo, key, and 7 more |
-| **Metadata enrichment** | Captures ISRC, explicit flag, and album release date from Spotify |
+| **Metadata enrichment** | Captures ISRC, explicit flag, album release date, popularity, and artist genres from Spotify |
+| **Artist genre tagging** | Fetches genre tags for each primary artist via the Spotify `/artists` endpoint |
 | **CSV fallback** | Works from a CSV export if you prefer not to use the live API |
 | **Resume after rate limits** | Match progress is cached every 25 tracks; re-running continues where you left off |
 | **Quota-friendly `--limit`** | Cap new tracks per run to stay within Spotify's daily API quota |
-| **Interactive menu** | Run without arguments for a guided step-by-step experience |
+| **Interactive menu** | Run without arguments for a guided, looping step-by-step experience |
 | **Dry-run mode** | Preview every change before it is applied |
 | **Unmatched tracking** | Saves failed matches to `data/unmatched.csv` for manual review or later retry |
 
@@ -220,7 +221,7 @@ ytmusic-to-spotify-sync/
 
 ## Output: enriched CSV
 
-The sync produces `data/playlist_enriched.csv` with 32 columns:
+The sync produces `data/playlist_enriched.csv` with 37 columns:
 
 | Column | Source |
 |--------|--------|
@@ -228,6 +229,10 @@ The sync produces `data/playlist_enriched.csv` with 32 columns:
 | `trackId`, `url`, `duration` | YT Music |
 | `spotify_uri`, `spotify_url` | Spotify match |
 | `isrc`, `explicit`, `album_release_date` | Spotify metadata |
+| `popularity` | Spotify track popularity (0–100) |
+| `artist_genres` | Primary artist genre tags (comma-separated) |
+| `album_type` | Album type (`album` / `single` / `compilation`) |
+| `track_number` | Track position within the album |
 | `danceability`, `energy`, `valence` | Spotify audio features |
 | `tempo`, `key`, `mode`, `loudness` | Spotify audio features |
 | `speechiness`, `acousticness` | Spotify audio features |
@@ -257,6 +262,7 @@ The sync produces `data/playlist_enriched.csv` with 32 columns:
 ## Known limitations
 
 - **Spotify Developer Mode** limits search to 10 results per request and imposes a daily quota. Use `--limit N` to spread large initial syncs over multiple days.
+- **Audio features restricted** — Spotify returns 403 on the `/audio-features` endpoint for most standard app types. The tool detects this and marks tracks as attempted so it won't retry. Popularity, genres, and other metadata still work.
 - **YT Music-exclusive tracks** (unreleased, region-locked, user uploads) will not have Spotify matches — these are tracked in `data/unmatched.csv`.
 - **ytmusicapi OAuth is broken** in v1.11.x — the tool uses browser-based authentication instead (stable, valid ~2 years).
 
