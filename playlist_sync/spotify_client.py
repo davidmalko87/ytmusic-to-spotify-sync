@@ -8,9 +8,11 @@ Version: 0.1.0
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 import spotipy
+from tqdm import tqdm
 from spotipy.oauth2 import SpotifyOAuth
 
 from playlist_sync.config import (
@@ -119,6 +121,79 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict]:
     return tracks
 
 
+def get_tracks_batch(
+    sp: spotipy.Spotify,
+    track_ids: list[str],
+) -> dict[str, dict]:
+    """Fetch full track objects for multiple tracks in batches of 50.
+
+    Returns {track_id: track_dict} for successfully fetched tracks.
+    Uses the /tracks endpoint which supports up to 50 IDs per call.
+    """
+    results: dict[str, dict] = {}
+    total_batches = math.ceil(len(track_ids) / 50)
+
+    for i in tqdm(range(0, len(track_ids), 50), desc="Metadata", unit="batch", total=total_batches):
+        batch = track_ids[i:i + 50]
+        time.sleep(SEARCH_DELAY_SEC)
+        try:
+            response = sp.tracks(batch)
+            for track in response.get("tracks", []):
+                if track:
+                    results[track["id"]] = track
+        except spotipy.SpotifyException as e:
+            if e.http_status == 429:
+                _handle_rate_limit(e)
+                try:
+                    response = sp.tracks(batch)
+                    for track in response.get("tracks", []):
+                        if track:
+                            results[track["id"]] = track
+                except spotipy.SpotifyException:
+                    logger.warning("Failed to fetch tracks batch at offset %d after retry", i)
+            else:
+                logger.warning("Failed to fetch tracks batch at offset %d: %s", i, e)
+
+    logger.info("Fetched metadata for %d/%d tracks", len(results), len(track_ids))
+    return results
+
+
+def get_artists_batch(
+    sp: spotipy.Spotify,
+    artist_ids: list[str],
+) -> dict[str, dict]:
+    """Fetch artist objects in batches of 50. Returns {artist_id: artist_dict}.
+
+    Each artist dict includes 'genres' (list of strings) and other metadata.
+    """
+    results: dict[str, dict] = {}
+    total_batches = math.ceil(len(artist_ids) / 50)
+
+    for i in tqdm(range(0, len(artist_ids), 50), desc="Artists", unit="batch", total=total_batches):
+        batch = artist_ids[i:i + 50]
+        time.sleep(SEARCH_DELAY_SEC)
+        try:
+            response = sp.artists(batch)
+            for artist in response.get("artists", []):
+                if artist:
+                    results[artist["id"]] = artist
+        except spotipy.SpotifyException as e:
+            if e.http_status == 429:
+                _handle_rate_limit(e)
+                try:
+                    response = sp.artists(batch)
+                    for artist in response.get("artists", []):
+                        if artist:
+                            results[artist["id"]] = artist
+                except spotipy.SpotifyException:
+                    logger.warning("Failed to fetch artists batch at offset %d after retry", i)
+            else:
+                logger.warning("Failed to fetch artists batch at offset %d: %s", i, e)
+
+    logger.info("Fetched genre data for %d/%d artists", len(results), len(artist_ids))
+    return results
+
+
 def get_audio_features_batch(
     sp: spotipy.Spotify,
     track_ids: list[str],
@@ -135,7 +210,7 @@ def get_audio_features_batch(
     features: dict[str, dict] = {}
     consecutive_403s = 0
 
-    for track_id in track_ids:
+    for track_id in tqdm(track_ids, desc="Audio features", unit="track"):
         time.sleep(SEARCH_DELAY_SEC)
         try:
             result = sp.audio_features([track_id])

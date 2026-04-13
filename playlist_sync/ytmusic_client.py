@@ -163,7 +163,11 @@ def fetch_playlist_tracks(
 
         duration_sec = 0.0
         if item.get("duration_seconds"):
-            duration_sec = float(item["duration_seconds"])
+            try:
+                duration_sec = float(item["duration_seconds"])
+            except (ValueError, TypeError):
+                logger.debug("Could not parse duration_seconds '%s' for '%s'",
+                             item["duration_seconds"], item.get("title", ""))
         elif item.get("duration"):
             try:
                 parts = str(item["duration"]).split(":")

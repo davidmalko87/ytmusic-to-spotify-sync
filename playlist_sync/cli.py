@@ -31,7 +31,12 @@ from playlist_sync.csv_manager import (
     write_unmatched_csv,
 )
 from playlist_sync.differ import diff_tracks
-from playlist_sync.enricher import apply_match_to_track, enrich_with_audio_features
+from playlist_sync.enricher import (
+    apply_match_to_track,
+    backfill_artist_genres,
+    backfill_track_metadata,
+    enrich_with_audio_features,
+)
 from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
 from playlist_sync.spotify_client import (
@@ -65,61 +70,73 @@ MENU_OPTIONS = [
 
 
 def interactive_menu() -> None:
-    """Show an interactive menu when no command is given."""
-    print()
-    print("=" * 50)
-    print("  Playlist Sync: YT Music -> Spotify")
-    print("=" * 50)
-    print()
-
-    for key, label, _ in MENU_OPTIONS:
-        print(f"  [{key}] {label}")
-
-    print()
-
-    try:
-        choice = input("Select an option: ").strip()
-    except (EOFError, KeyboardInterrupt):
+    """Show an interactive menu in a loop until user exits."""
+    while True:
         print()
-        return
+        print("=" * 50)
+        print("  Playlist Sync: YT Music -> Spotify")
+        print("=" * 50)
+        print()
 
-    # Map choice to command
-    cmd = None
-    for key, _, command in MENU_OPTIONS:
-        if choice == key:
-            cmd = command
-            break
+        for key, label, _ in MENU_OPTIONS:
+            print(f"  [{key}] {label}")
 
-    if cmd is None:
-        print(f"Unknown option: {choice}")
-        return
-    if cmd == "exit":
-        return
+        print()
 
-    # Ask about dry-run for commands that support it
-    dry_run = False
-    if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched"):
         try:
-            dr = input("Dry run? (y/N): ").strip().lower()
-            dry_run = dr in ("y", "yes")
+            choice = input("Select an option: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return
+            break
 
-    # Build a fake namespace and dispatch
-    args = argparse.Namespace(
-        command=cmd,
-        verbose=False,
-        dry_run=dry_run,
-        csv=None,
-        from_csv=None,
-    )
+        # Map choice to command
+        cmd = None
+        for key, _, command in MENU_OPTIONS:
+            if choice == key:
+                cmd = command
+                break
 
-    if cmd == "sync-csv":
-        args.command = "sync"
-        args.from_csv = "default"
+        if cmd is None:
+            print(f"Unknown option: {choice}")
+            continue
+        if cmd == "exit":
+            break
 
-    dispatch(args)
+        # Ask about dry-run for commands that support it
+        dry_run = False
+        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched"):
+            try:
+                dr = input("Dry run? (y/N): ").strip().lower()
+                dry_run = dr in ("y", "yes")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+        # Build a fake namespace and dispatch
+        args = argparse.Namespace(
+            command=cmd,
+            verbose=False,
+            dry_run=dry_run,
+            csv=None,
+            from_csv=None,
+        )
+
+        if cmd == "sync-csv":
+            args.command = "sync"
+            args.from_csv = "default"
+
+        try:
+            dispatch(args)
+        except SystemExit:
+            pass
+        except Exception as e:
+            print(f"\nError: {e}")
+
+        try:
+            input("\nPress Enter to continue...")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
 
 # ── Match cache for resume after rate limits ────────────────────────
@@ -131,6 +148,7 @@ def _load_match_cache() -> dict[str, dict]:
         try:
             data = json.loads(MATCH_CACHE.read_text(encoding="utf-8"))
             print(f"Resuming: loaded {len(data)} cached matches from previous run")
+            print(f"  (To start fresh, delete: {MATCH_CACHE})")
             return data
         except (json.JSONDecodeError, KeyError):
             pass
@@ -400,9 +418,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
             action = "[DRY RUN] Would remove" if args.dry_run else "Removed"
             print(f"{action} {removed} tracks from Spotify playlist")
 
-    # Step 7: Fetch audio features for newly matched tracks
+    # Step 7: Backfill Spotify metadata, genres, and audio features
     if already_matched and not args.dry_run:
-        print("\nFetching audio features...")
+        print("\nBackfilling Spotify metadata...")
+        backfill_track_metadata(sp, already_matched)
+        print("Fetching artist genres...")
+        backfill_artist_genres(sp, already_matched)
+        print("Fetching audio features...")
         enrich_with_audio_features(sp, already_matched)
 
     # Step 8: Save outputs
@@ -420,8 +442,21 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     _clear_match_cache()
 
+    # Sync summary
     limit = getattr(args, "limit", None)
     total_still_pending = len(current) - len(already_matched) - len(matched_results) - len(unmatched_tracks)
+
+    print("\n--- Sync Summary ---")
+    print(f"  Total tracks:    {len(current)}")
+    print(f"  Already matched: {len(already_matched)}")
+    print(f"  Newly matched:   {len(matched_results)}")
+    print(f"  Unmatched:       {len(unmatched_tracks)}")
+    if matched_results:
+        methods: dict[str, int] = {}
+        for r in matched_results:
+            methods[r.method] = methods.get(r.method, 0) + 1
+        print(f"  Match methods:   {methods}")
+
     if limit and total_still_pending > 0:
         print(f"\nPartial sync complete. {total_still_pending} tracks still need matching.")
         print(f"Re-run tomorrow: python playlist_sync.py sync --limit {limit}")

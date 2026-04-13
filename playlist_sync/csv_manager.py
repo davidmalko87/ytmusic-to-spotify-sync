@@ -8,6 +8,7 @@ Version: 0.1.0
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -48,6 +49,17 @@ def read_enriched_csv(path: Path | None = None) -> list[Track]:
     return tracks
 
 
+def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
+    """Write DataFrame to CSV with fallback on PermissionError (e.g. file open in Excel)."""
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+    except PermissionError:
+        fallback = path.with_stem(f"{path.stem}_{datetime.now().strftime('%H%M%S')}")
+        df.to_csv(fallback, index=False, encoding="utf-8-sig")
+        logger.warning("Could not write to %s (file locked). Saved to: %s", path, fallback)
+        print(f"WARNING: {path.name} is locked (open in Excel?). Saved to: {fallback.name}")
+
+
 def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> None:
     """Write tracks to the enriched CSV."""
     path = path or ENRICHED_CSV
@@ -55,7 +67,7 @@ def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> None:
 
     rows = [t.to_csv_row() for t in tracks]
     df = pd.DataFrame(rows, columns=ENRICHED_COLUMNS)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+    _safe_csv_write(df, path)
 
     logger.info("Wrote %d tracks to enriched CSV: %s", len(tracks), path)
 
@@ -77,6 +89,6 @@ def write_unmatched_csv(tracks: list[Track], path: Path | None = None) -> None:
         for t in tracks
     ]
     df = pd.DataFrame(rows)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+    _safe_csv_write(df, path)
 
     logger.info("Wrote %d unmatched tracks to: %s", len(tracks), path)

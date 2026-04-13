@@ -45,6 +45,13 @@ class Track:
     instrumentalness: float = 0.0
     liveness: float = 0.0
     time_signature: int = 0
+    audio_features_fetched: bool = False
+
+    # Additional Spotify enrichment (from /tracks and /artists endpoints)
+    popularity: int = 0
+    artist_genres: str = ""
+    album_type: str = ""
+    track_number: int = 0
 
     # Matching metadata
     match_method: str = ""
@@ -82,18 +89,23 @@ class Track:
             "isrc_enriched": self.isrc if self.isrc else "",
             "explicit": str(self.explicit).lower() if self.has_spotify_match else "",
             "album_release_date": self.album_release_date,
-            "danceability": f"{self.danceability:.4f}" if self.danceability else "",
-            "energy": f"{self.energy:.4f}" if self.energy else "",
-            "valence": f"{self.valence:.4f}" if self.valence else "",
-            "tempo": f"{self.tempo:.1f}" if self.tempo else "",
-            "key": str(self.key) if self.key >= 0 else "",
-            "mode": str(self.mode) if self.mode >= 0 else "",
-            "loudness": f"{self.loudness:.2f}" if self.loudness else "",
-            "speechiness": f"{self.speechiness:.4f}" if self.speechiness else "",
-            "acousticness": f"{self.acousticness:.4f}" if self.acousticness else "",
-            "instrumentalness": f"{self.instrumentalness:.4f}" if self.instrumentalness else "",
-            "liveness": f"{self.liveness:.4f}" if self.liveness else "",
-            "time_signature": str(self.time_signature) if self.time_signature else "",
+            "danceability": f"{self.danceability:.4f}" if self.audio_features_fetched else "",
+            "energy": f"{self.energy:.4f}" if self.audio_features_fetched else "",
+            "valence": f"{self.valence:.4f}" if self.audio_features_fetched else "",
+            "tempo": f"{self.tempo:.1f}" if self.audio_features_fetched else "",
+            "key": str(self.key) if self.audio_features_fetched and self.key >= 0 else "",
+            "mode": str(self.mode) if self.audio_features_fetched and self.mode >= 0 else "",
+            "loudness": f"{self.loudness:.2f}" if self.audio_features_fetched else "",
+            "speechiness": f"{self.speechiness:.4f}" if self.audio_features_fetched else "",
+            "acousticness": f"{self.acousticness:.4f}" if self.audio_features_fetched else "",
+            "instrumentalness": f"{self.instrumentalness:.4f}" if self.audio_features_fetched else "",
+            "liveness": f"{self.liveness:.4f}" if self.audio_features_fetched else "",
+            "time_signature": str(self.time_signature) if self.audio_features_fetched else "",
+            "audio_features_fetched": "true" if self.audio_features_fetched else "",
+            "popularity": str(self.popularity) if self.popularity else "",
+            "artist_genres": self.artist_genres,
+            "album_type": self.album_type,
+            "track_number": str(self.track_number) if self.track_number else "",
             "match_method": self.match_method,
             "match_confidence": f"{self.match_confidence:.2f}" if self.match_confidence else "",
             "first_synced": self.first_synced,
@@ -131,6 +143,11 @@ class Track:
             instrumentalness=float(row["instrumentalness"]) if row.get("instrumentalness") else 0.0,
             liveness=float(row["liveness"]) if row.get("liveness") else 0.0,
             time_signature=int(row["time_signature"]) if row.get("time_signature") else 0,
+            audio_features_fetched=row.get("audio_features_fetched", "").lower() == "true",
+            popularity=int(row["popularity"]) if row.get("popularity") else 0,
+            artist_genres=row.get("artist_genres", ""),
+            album_type=row.get("album_type", ""),
+            track_number=int(row["track_number"]) if row.get("track_number") else 0,
             match_method=row.get("match_method", ""),
             match_confidence=float(row["match_confidence"]) if row.get("match_confidence") else 0.0,
             first_synced=row.get("first_synced", ""),

@@ -82,7 +82,7 @@ def match_by_isrc(sp: spotipy.Spotify, track: Track) -> MatchResult | None:
     return MatchResult(
         source_track=track,
         method="isrc",
-        confidence=max(confidence, 0.95),
+        confidence=min(max(confidence, 0.95), 1.0),
         **data,
     )
 
@@ -105,7 +105,7 @@ def match_by_title_artist(sp: spotipy.Spotify, track: Track) -> MatchResult | No
         dur_ok = duration_close(
             track.duration, candidate.get("duration_ms", 0), DURATION_TOLERANCE_SEC
         )
-        effective_score = score + (0.1 if dur_ok else 0.0)
+        effective_score = min(score + (0.1 if dur_ok else 0.0), 1.0)
 
         if effective_score > best_score:
             best_score = effective_score

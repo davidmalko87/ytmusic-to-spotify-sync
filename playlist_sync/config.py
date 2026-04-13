@@ -30,6 +30,8 @@ ENRICHED_COLUMNS = [
     "danceability", "energy", "valence", "tempo",
     "key", "mode", "loudness", "speechiness",
     "acousticness", "instrumentalness", "liveness", "time_signature",
+    "audio_features_fetched",
+    "popularity", "artist_genres", "album_type", "track_number",
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 
