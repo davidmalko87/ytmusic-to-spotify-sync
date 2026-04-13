@@ -65,7 +65,8 @@ MENU_OPTIONS = [
     ("5", "Full sync to Spotify",    "sync"),
     ("6", "Sync from CSV file",      "sync-csv"),
     ("7", "Retry unmatched tracks",  "retry-unmatched"),
-    ("8", "Show status",             "status"),
+    ("8", "Enrich with Last.fm",     "lastfm"),
+    ("9", "Show status",             "status"),
     ("0", "Exit",                    "exit"),
 ]
 
@@ -105,7 +106,7 @@ def interactive_menu() -> None:
 
         # Ask about dry-run for commands that support it
         dry_run = False
-        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched"):
+        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched", "lastfm"):
             try:
                 dr = input("Dry run? (y/N): ").strip().lower()
                 dry_run = dr in ("y", "yes")
@@ -564,6 +565,56 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
             print("All tracks matched! Removed unmatched.csv")
 
 
+def cmd_lastfm(args: argparse.Namespace) -> None:
+    """Enrich tracks with Last.fm play counts, listeners, and tags.
+
+    Works on the enriched CSV if it exists. If no enriched CSV but a
+    snapshot exists, enriches all tracks from the latest snapshot
+    (doesn't need Spotify matching — Last.fm matches by artist+title).
+    """
+    setup_logging(args.verbose)
+    config = load_config()
+    ensure_dirs()
+
+    lastfm_key = config.get("LASTFM_API_KEY", "")
+    if not lastfm_key:
+        print("Error: LASTFM_API_KEY not set in .env")
+        print("Get a free key at: https://www.last.fm/api/account/create")
+        sys.exit(1)
+
+    # Load tracks: prefer enriched CSV, fall back to snapshot
+    if ENRICHED_CSV.exists():
+        tracks = read_enriched_csv()
+        print(f"Loaded {len(tracks)} tracks from enriched CSV")
+    else:
+        snapshot_tracks = load_latest_snapshot()
+        if not snapshot_tracks:
+            print("Error: no enriched CSV or snapshot found.")
+            print("Run option 3 (Snapshot) or option 5 (Full sync) first.")
+            sys.exit(1)
+        tracks = snapshot_tracks
+        print(f"Loaded {len(tracks)} tracks from latest snapshot")
+
+    needs_lastfm = [t for t in tracks if not t.lastfm_playcount and t.title and t.artist]
+    print(f"Need Last.fm data: {len(needs_lastfm)}")
+
+    if not needs_lastfm:
+        print("All tracks already have Last.fm data.")
+        return
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would fetch Last.fm data for {len(needs_lastfm)} tracks")
+        return
+
+    backfill_lastfm_data(lastfm_key, tracks)
+
+    write_enriched_csv(tracks)
+    print(f"Enriched CSV updated: {ENRICHED_CSV}")
+
+    enriched = sum(1 for t in tracks if t.lastfm_playcount)
+    print(f"\nLast.fm enrichment complete: {enriched}/{len(tracks)} tracks have data")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show sync statistics."""
     setup_logging(args.verbose)
@@ -652,6 +703,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_retry = sub.add_parser("retry-unmatched", help="Re-attempt matching for unmatched tracks")
     p_retry.add_argument("--dry-run", action="store_true", help="Preview without pushing")
 
+    p_lastfm = sub.add_parser("lastfm", help="Enrich matched tracks with Last.fm data")
+    p_lastfm.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
     sub.add_parser("status", help="Show sync statistics")
 
     return parser
@@ -666,6 +720,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "diff": cmd_diff,
         "sync": cmd_sync,
         "retry-unmatched": cmd_retry_unmatched,
+        "lastfm": cmd_lastfm,
         "status": cmd_status,
     }
     handler = commands.get(args.command)
