@@ -310,7 +310,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}")
 
-    if not needs_matching and not diff.removed:
+    # Check if any matched tracks still need enrichment (backfill)
+    needs_enrichment = any(
+        not t.popularity or not t.artist_genres
+        for t in already_matched
+        if t.has_spotify_match
+    )
+
+    if not needs_matching and not diff.removed and not needs_enrichment:
         print("Nothing to do.")
         if not args.dry_run:
             save_snapshot(current)
