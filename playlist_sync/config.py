@@ -32,6 +32,7 @@ ENRICHED_COLUMNS = [
     "acousticness", "instrumentalness", "liveness", "time_signature",
     "audio_features_fetched",
     "popularity", "artist_genres", "album_type", "track_number",
+    "lastfm_playcount", "lastfm_listeners", "lastfm_tags",
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 
@@ -66,6 +67,7 @@ def load_config() -> dict[str, str]:
         "YTMUSIC_PLAYLIST_ID": os.getenv("YTMUSIC_PLAYLIST_ID", ""),
         "YTMUSIC_AUTH_FILE": os.getenv("YTMUSIC_AUTH_FILE", str(PROJECT_ROOT / "browser.json")),
         "SOURCE_CSV": os.getenv("SOURCE_CSV", ""),
+        "LASTFM_API_KEY": os.getenv("LASTFM_API_KEY", ""),
     }
     return config
 

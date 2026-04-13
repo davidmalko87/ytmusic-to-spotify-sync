@@ -53,6 +53,11 @@ class Track:
     album_type: str = ""
     track_number: int = 0
 
+    # Last.fm enrichment
+    lastfm_playcount: int = 0
+    lastfm_listeners: int = 0
+    lastfm_tags: str = ""
+
     # Matching metadata
     match_method: str = ""
     match_confidence: float = 0.0
@@ -106,6 +111,9 @@ class Track:
             "artist_genres": self.artist_genres,
             "album_type": self.album_type,
             "track_number": str(self.track_number) if self.track_number else "",
+            "lastfm_playcount": str(self.lastfm_playcount) if self.lastfm_playcount else "",
+            "lastfm_listeners": str(self.lastfm_listeners) if self.lastfm_listeners else "",
+            "lastfm_tags": self.lastfm_tags,
             "match_method": self.match_method,
             "match_confidence": f"{self.match_confidence:.2f}" if self.match_confidence else "",
             "first_synced": self.first_synced,
@@ -148,6 +156,9 @@ class Track:
             artist_genres=row.get("artist_genres", ""),
             album_type=row.get("album_type", ""),
             track_number=int(row["track_number"]) if row.get("track_number") else 0,
+            lastfm_playcount=int(row["lastfm_playcount"]) if row.get("lastfm_playcount") else 0,
+            lastfm_listeners=int(row["lastfm_listeners"]) if row.get("lastfm_listeners") else 0,
+            lastfm_tags=row.get("lastfm_tags", ""),
             match_method=row.get("match_method", ""),
             match_confidence=float(row["match_confidence"]) if row.get("match_confidence") else 0.0,
             first_synced=row.get("first_synced", ""),

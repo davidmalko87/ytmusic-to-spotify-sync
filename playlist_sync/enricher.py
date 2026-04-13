@@ -5,7 +5,8 @@ Date: 2026-03-22
 Version: 0.3.0
 
 Enriches tracks with Spotify metadata (ISRC, release date, explicit,
-popularity, artist genres) and audio features (danceability, energy, etc.).
+popularity, artist genres), audio features (danceability, energy, etc.),
+and Last.fm data (play counts, listeners, genre/mood tags).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import datetime
 
 import spotipy
 
+from playlist_sync.lastfm_client import get_tracks_info_batch
 from playlist_sync.models import MatchResult, Track
 from playlist_sync.spotify_client import (
     get_artists_batch,
@@ -219,4 +221,46 @@ def enrich_with_audio_features(
         t.audio_features_fetched = True
 
     logger.info("Applied audio features to %d/%d tracks", enriched_count, len(track_id_map))
+    return tracks
+
+
+def backfill_lastfm_data(
+    api_key: str,
+    tracks: list[Track],
+) -> list[Track]:
+    """Fetch and apply Last.fm play counts, listeners, and tags.
+
+    Uses artist + track name matching (no Spotify IDs needed).
+    Only fetches for tracks that don't already have Last.fm data.
+    """
+    needs_lastfm = [
+        t for t in tracks
+        if not t.lastfm_playcount and t.title and t.artist
+    ]
+
+    if not needs_lastfm:
+        logger.info("All tracks already have Last.fm data")
+        return tracks
+
+    # Build lookup pairs
+    lookup_pairs = [(t.artist, t.title) for t in needs_lastfm]
+    pair_to_tracks: dict[tuple[str, str], Track] = {
+        (t.artist, t.title): t for t in needs_lastfm
+    }
+
+    logger.info("Fetching Last.fm data for %d tracks...", len(lookup_pairs))
+    results = get_tracks_info_batch(api_key, lookup_pairs)
+
+    enriched_count = 0
+    for (artist, title), info in results.items():
+        key = (artist, title)
+        if key in pair_to_tracks:
+            t = pair_to_tracks[key]
+            t.lastfm_playcount = info.get("playcount", 0)
+            t.lastfm_listeners = info.get("listeners", 0)
+            tags = info.get("tags", [])
+            t.lastfm_tags = ", ".join(tags[:5]) if tags else ""
+            enriched_count += 1
+
+    logger.info("Applied Last.fm data to %d/%d tracks", enriched_count, len(needs_lastfm))
     return tracks

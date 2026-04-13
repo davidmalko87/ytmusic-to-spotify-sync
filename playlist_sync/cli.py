@@ -34,6 +34,7 @@ from playlist_sync.differ import diff_tracks
 from playlist_sync.enricher import (
     apply_match_to_track,
     backfill_artist_genres,
+    backfill_lastfm_data,
     backfill_track_metadata,
     enrich_with_audio_features,
 )
@@ -312,7 +313,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
-        not t.popularity or not t.artist_genres
+        not t.popularity or not t.artist_genres or not t.lastfm_playcount
         for t in already_matched
         if t.has_spotify_match
     )
@@ -447,6 +448,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
         backfill_artist_genres(sp, already_matched)
         print("Fetching audio features...")
         enrich_with_audio_features(sp, already_matched)
+
+        # Last.fm enrichment (play counts, listeners, tags)
+        lastfm_key = config.get("LASTFM_API_KEY", "")
+        if lastfm_key:
+            print("Fetching Last.fm data...")
+            backfill_lastfm_data(lastfm_key, already_matched)
+        else:
+            logger.info("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
 
     # Step 8: Save outputs
     if not args.dry_run:
