@@ -344,6 +344,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
                         spotify_url=cached.get("spotify_url", ""),
                         method=cached.get("method", "cached"),
                         confidence=cached.get("confidence", 0.0),
+                        isrc=cached.get("isrc", ""),
+                        explicit=cached.get("explicit", False),
+                        album_release_date=cached.get("album_release_date", ""),
+                        spotify_duration_ms=cached.get("spotify_duration_ms", 0),
+                        popularity=cached.get("popularity", 0),
+                        album_type=cached.get("album_type", ""),
+                        track_number=cached.get("track_number", 0),
                     )
                     enriched_track = apply_match_to_track(track, result)
                     already_matched.append(enriched_track)
@@ -381,6 +388,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
                             "spotify_url": result.spotify_url,
                             "method": result.method,
                             "confidence": result.confidence,
+                            "isrc": result.isrc,
+                            "explicit": result.explicit,
+                            "album_release_date": result.album_release_date,
+                            "spotify_duration_ms": result.spotify_duration_ms,
+                            "popularity": result.popularity,
+                            "album_type": result.album_type,
+                            "track_number": result.track_number,
                         }
                     else:
                         unmatched_tracks.append(track)

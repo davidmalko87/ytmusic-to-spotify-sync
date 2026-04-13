@@ -166,6 +166,10 @@ class MatchResult:
     isrc: str = ""
     explicit: bool = False
     album_release_date: str = ""
+    popularity: int = 0
+    album_type: str = ""
+    track_number: int = 0
+    primary_artist_id: str = ""
     method: str = ""
     confidence: float = 0.0
     error: str = ""

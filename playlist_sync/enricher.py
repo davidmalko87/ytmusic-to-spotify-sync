@@ -37,6 +37,9 @@ def apply_match_to_track(track: Track, result: MatchResult) -> Track:
     track.spotify_duration_ms = result.spotify_duration_ms
     track.explicit = result.explicit
     track.album_release_date = result.album_release_date
+    track.popularity = result.popularity
+    track.album_type = result.album_type
+    track.track_number = result.track_number
     track.match_method = result.method
     track.match_confidence = result.confidence
     track.last_synced = now

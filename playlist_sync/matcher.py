@@ -37,9 +37,17 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _extract_spotify_match_data(sp_track: dict) -> dict:
-    """Extract relevant fields from a Spotify track result."""
+    """Extract relevant fields from a Spotify track result.
+
+    Search results already contain full track data including popularity,
+    album info, and artist IDs — no extra API calls needed.
+    """
     external_ids = sp_track.get("external_ids", {})
     album = sp_track.get("album", {})
+    artists = sp_track.get("artists", [])
+    # Artist genres are NOT in search results (need /artists endpoint),
+    # but artist IDs are — store the primary artist ID for later.
+    primary_artist_id = artists[0].get("id", "") if artists else ""
     return {
         "spotify_uri": sp_track.get("uri", ""),
         "spotify_url": sp_track.get("external_urls", {}).get("spotify", ""),
@@ -47,6 +55,10 @@ def _extract_spotify_match_data(sp_track: dict) -> dict:
         "isrc": external_ids.get("isrc", ""),
         "explicit": sp_track.get("explicit", False),
         "album_release_date": album.get("release_date", ""),
+        "popularity": sp_track.get("popularity", 0),
+        "album_type": album.get("album_type", ""),
+        "track_number": sp_track.get("track_number", 0),
+        "primary_artist_id": primary_artist_id,
     }
 
 

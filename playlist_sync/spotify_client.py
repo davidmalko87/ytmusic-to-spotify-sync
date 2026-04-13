@@ -129,9 +129,11 @@ def get_tracks_batch(
 
     Returns {track_id: track_dict} for successfully fetched tracks.
     Uses the /tracks endpoint which supports up to 50 IDs per call.
+    Stops early if the endpoint returns 403 (restricted in Dev Mode).
     """
     results: dict[str, dict] = {}
     total_batches = math.ceil(len(track_ids) / 50)
+    consecutive_403s = 0
 
     for i in tqdm(range(0, len(track_ids), 50), desc="Metadata", unit="batch", total=total_batches):
         batch = track_ids[i:i + 50]
@@ -141,8 +143,18 @@ def get_tracks_batch(
             for track in response.get("tracks", []):
                 if track:
                     results[track["id"]] = track
+            consecutive_403s = 0
         except spotipy.SpotifyException as e:
-            if e.http_status == 429:
+            if e.http_status == 403:
+                consecutive_403s += 1
+                if consecutive_403s >= 3:
+                    logger.warning(
+                        "/tracks endpoint returned 403 three times in a row. "
+                        "Spotify has restricted this endpoint for your app type. Skipping."
+                    )
+                    break
+            elif e.http_status == 429:
+                consecutive_403s = 0
                 _handle_rate_limit(e)
                 try:
                     response = sp.tracks(batch)
@@ -152,6 +164,7 @@ def get_tracks_batch(
                 except spotipy.SpotifyException:
                     logger.warning("Failed to fetch tracks batch at offset %d after retry", i)
             else:
+                consecutive_403s = 0
                 logger.warning("Failed to fetch tracks batch at offset %d: %s", i, e)
 
     logger.info("Fetched metadata for %d/%d tracks", len(results), len(track_ids))
@@ -168,6 +181,7 @@ def get_artists_batch(
     """
     results: dict[str, dict] = {}
     total_batches = math.ceil(len(artist_ids) / 50)
+    consecutive_403s = 0
 
     for i in tqdm(range(0, len(artist_ids), 50), desc="Artists", unit="batch", total=total_batches):
         batch = artist_ids[i:i + 50]
@@ -177,8 +191,18 @@ def get_artists_batch(
             for artist in response.get("artists", []):
                 if artist:
                     results[artist["id"]] = artist
+            consecutive_403s = 0
         except spotipy.SpotifyException as e:
-            if e.http_status == 429:
+            if e.http_status == 403:
+                consecutive_403s += 1
+                if consecutive_403s >= 3:
+                    logger.warning(
+                        "/artists endpoint returned 403 three times in a row. "
+                        "Spotify has restricted this endpoint for your app type. Skipping."
+                    )
+                    break
+            elif e.http_status == 429:
+                consecutive_403s = 0
                 _handle_rate_limit(e)
                 try:
                     response = sp.artists(batch)
@@ -188,6 +212,7 @@ def get_artists_batch(
                 except spotipy.SpotifyException:
                     logger.warning("Failed to fetch artists batch at offset %d after retry", i)
             else:
+                consecutive_403s = 0
                 logger.warning("Failed to fetch artists batch at offset %d: %s", i, e)
 
     logger.info("Fetched genre data for %d/%d artists", len(results), len(artist_ids))
