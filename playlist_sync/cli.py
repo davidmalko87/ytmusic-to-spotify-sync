@@ -318,13 +318,29 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if t.has_spotify_match
     )
 
+    # Step 5: Enrich already-matched tracks FIRST (doesn't need Spotify API)
+    # This way enrichment data is saved even if matching hits rate limits.
+    if already_matched and not args.dry_run:
+        lastfm_key = config.get("LASTFM_API_KEY", "")
+        if lastfm_key and needs_enrichment:
+            print("\nFetching Last.fm data...")
+            backfill_lastfm_data(lastfm_key, already_matched)
+
     if not needs_matching and not diff.removed and not needs_enrichment:
-        print("Nothing to do.")
+        # Still save if we just enriched
         if not args.dry_run:
+            all_tracks = already_matched + [
+                t for t in current if not any(
+                    t.fingerprint == m.fingerprint for m in already_matched
+                )
+            ]
+            write_enriched_csv(already_matched)
+            print(f"Enriched CSV updated: {ENRICHED_CSV}")
             save_snapshot(current)
+        print("Nothing new to match.")
         return
 
-    # Step 5: Match new tracks (with resume support)
+    # Step 6: Match new tracks (with resume support)
     sp = get_spotify_client(config)
     matched_results = []
     unmatched_tracks: list[Track] = []
@@ -414,6 +430,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 print(f"Remaining: {remaining} tracks")
                 print(f"Wait ~{hrs:.1f}h then re-run: python playlist_sync.py sync")
                 print("Your progress will be restored automatically.")
+
+                # Save enriched CSV with whatever we have so far
+                if not args.dry_run:
+                    all_tracks = already_matched + unmatched_tracks
+                    write_enriched_csv(all_tracks)
+                    print(f"Enriched CSV saved: {ENRICHED_CSV}")
+                    save_snapshot(current)
                 return
 
         print(f"Matched: {len(matched_results)}, Unmatched: {len(unmatched_tracks)}")
@@ -440,7 +463,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             action = "[DRY RUN] Would remove" if args.dry_run else "Removed"
             print(f"{action} {removed} tracks from Spotify playlist")
 
-    # Step 7: Backfill Spotify metadata, genres, and audio features
+    # Step 8: Backfill Spotify metadata, genres, and audio features
     if already_matched and not args.dry_run:
         print("\nBackfilling Spotify metadata...")
         backfill_track_metadata(sp, already_matched)
@@ -449,10 +472,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
         print("Fetching audio features...")
         enrich_with_audio_features(sp, already_matched)
 
-        # Last.fm enrichment (play counts, listeners, tags)
+        # Last.fm enrichment for newly matched tracks (already_matched from
+        # previous runs were enriched in Step 5; this catches new matches)
         lastfm_key = config.get("LASTFM_API_KEY", "")
         if lastfm_key:
-            print("Fetching Last.fm data...")
+            print("Fetching Last.fm data for new matches...")
             backfill_lastfm_data(lastfm_key, already_matched)
         else:
             logger.info("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
