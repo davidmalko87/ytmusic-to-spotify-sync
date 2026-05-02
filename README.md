@@ -3,7 +3,7 @@
 > Automatically sync your YouTube Music playlists to Spotify — with smart track matching, diff-based updates, and full metadata enrichment.
 
 [![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
@@ -26,9 +26,10 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 | **3-pass smart matching** | ISRC exact match → normalised title + artist → fuzzy fallback with duration validation |
 | **Diff-based sync** | JSON snapshots track playlist state; only added/removed tracks are touched each run |
 | **Spotify playlist management** | Adds new matches and removes deleted tracks automatically |
-| **Audio features enrichment** | Annotates every track with danceability, energy, valence, tempo, key, and 7 more |
-| **Metadata enrichment** | Captures ISRC, explicit flag, album release date, popularity, and artist genres from Spotify |
-| **Artist genre tagging** | Fetches genre tags for each primary artist via the Spotify `/artists` endpoint |
+| **Audio features enrichment** | Schema for danceability, energy, valence, tempo, key, and 7 more *(populated only if your Spotify app has audio-features access; see Known limitations)* |
+| **Metadata enrichment** | Captures ISRC, explicit flag, album release date, album type, track number, and Spotify popularity |
+| **Last.fm artist tags** | Pulls play counts, listeners, and dense genre tags via `artist.getInfo` (typical ~93 % coverage on niche libraries) |
+| **Local genre + mood classification** | Derives `primary_genre` (17 buckets) and `mood` (13 labels) from the tag pool — no API calls |
 | **CSV fallback** | Works from a CSV export if you prefer not to use the live API |
 | **Resume after rate limits** | Match progress is cached every 25 tracks; re-running continues where you left off |
 | **Quota-friendly `--limit`** | Cap new tracks per run to stay within Spotify's daily API quota |
@@ -112,6 +113,7 @@ All options are set via environment variables (`.env` file or shell environment)
 | `YTMUSIC_PLAYLIST_ID` | Yes* | — | ID of the source YT Music playlist (*not needed with `--from-csv`) |
 | `YTMUSIC_AUTH_FILE` | No | `browser.json` | Path to the YT Music auth JSON file |
 | `SOURCE_CSV` | No | — | Path to a CSV export to use instead of the live API |
+| `LASTFM_API_KEY` | No | — | Free key from [last.fm/api/account/create](https://www.last.fm/api/account/create) — enables play-count, listener, and artist-tag enrichment |
 
 ---
 
@@ -128,15 +130,17 @@ python playlist_sync.py
   Playlist Sync: YT Music -> Spotify
 ==================================================
 
-  [1] Setup YT Music auth
-  [2] Import from CSV
-  [3] Snapshot YT Music playlist
-  [4] Show diff (changes)
-  [5] Full sync to Spotify
-  [6] Sync from CSV file
-  [7] Retry unmatched tracks
-  [8] Show status
-  [0] Exit
+  [1]  Setup YT Music auth
+  [2]  Import from CSV
+  [3]  Snapshot YT Music playlist
+  [4]  Show diff (changes)
+  [5]  Full sync to Spotify
+  [6]  Sync from CSV file
+  [7]  Retry unmatched tracks
+  [8]  Enrich with Last.fm
+  [9]  Classify genre + mood from tags
+  [10] Show status
+  [0]  Exit
 ```
 
 ### Command-line mode
@@ -150,6 +154,9 @@ python playlist_sync.py sync --from-csv        # Sync from CSV export instead
 python playlist_sync.py sync --dry-run         # Preview without making changes
 python playlist_sync.py sync --limit 50        # Match at most 50 new tracks this run
 python playlist_sync.py retry-unmatched        # Retry previously failed matches
+python playlist_sync.py lastfm                 # Re-run Last.fm enrichment on the existing CSV
+python playlist_sync.py classify               # Re-derive primary_genre and mood from tags
+python playlist_sync.py classify --force       # Re-classify even rows that already have values
 python playlist_sync.py status                 # Show sync statistics
 ```
 
@@ -205,7 +212,8 @@ ytmusic-to-spotify-sync/
 │   ├── spotify_client.py      # Spotify API wrapper with rate-limit handling
 │   ├── matcher.py             # 3-pass track matching engine
 │   ├── differ.py              # Snapshot diff engine
-│   └── enricher.py            # Metadata and audio feature enrichment
+│   ├── enricher.py            # Metadata, audio features, classification
+│   └── lastfm_client.py       # Last.fm API wrapper (track + artist endpoints)
 ├── data/                      # Created at runtime
 │   ├── snapshots/             # JSON snapshots (latest.json + timestamped)
 │   ├── playlist_enriched.csv  # Full enriched output
@@ -221,24 +229,42 @@ ytmusic-to-spotify-sync/
 
 ## Output: enriched CSV
 
-The sync produces `data/playlist_enriched.csv` with 37 columns:
+The sync produces `data/playlist_enriched.csv` with **48 columns**:
 
 | Column | Source |
 |--------|--------|
 | `title`, `artist`, `album` | YT Music |
 | `trackId`, `url`, `duration` | YT Music |
-| `spotify_uri`, `spotify_url` | Spotify match |
-| `isrc`, `explicit`, `album_release_date` | Spotify metadata |
-| `popularity` | Spotify track popularity (0–100) |
-| `artist_genres` | Primary artist genre tags (comma-separated) |
+| `spotify_uri`, `spotify_url`, `spotify_duration_ms` | Spotify match |
+| `isrc`, `isrc_enriched`, `explicit`, `album_release_date` | Spotify metadata |
+| `popularity` | Spotify track popularity (0–100) — only with extended-access apps |
+| `artist_genres` | Primary artist genre tags from Spotify `/artists` — only with extended-access apps |
 | `album_type` | Album type (`album` / `single` / `compilation`) |
 | `track_number` | Track position within the album |
-| `danceability`, `energy`, `valence` | Spotify audio features |
+| `danceability`, `energy`, `valence` | Spotify audio features — only with extended-access apps |
 | `tempo`, `key`, `mode`, `loudness` | Spotify audio features |
 | `speechiness`, `acousticness` | Spotify audio features |
 | `instrumentalness`, `liveness`, `time_signature` | Spotify audio features |
+| `audio_features_fetched` | Skip-flag — audio features endpoint already attempted |
+| `lastfm_playcount`, `lastfm_listeners`, `lastfm_tags` | Last.fm `track.getInfo` |
+| **`artist_tags`** | Last.fm `artist.getInfo` — much denser than track tags |
+| `tag_source` | Which source filled `artist_tags` (`lastfm_artist`, …) |
+| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm endpoints already attempted |
+| `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
+| **`primary_genre`** | Single broad genre bucket (`electronic`, `rock`, `soundtrack`, …) — derived locally from tags |
+| **`mood`** | Multi-label mood (`chill`, `epic`, `cinematic`, …) — derived locally from tags |
 | `match_method`, `match_confidence` | Matching diagnostics |
 | `first_synced`, `last_synced` | Sync timestamps |
+
+### Genre & mood classification
+
+`primary_genre` and `mood` are **derived locally** from the tag pool (`artist_tags` + `lastfm_tags`) — no API calls. This runs automatically at the end of every `sync` and `lastfm` command, and can be triggered standalone with `python playlist_sync.py classify` (or `--force` to re-bucket rows that already have values).
+
+The classifier uses word-boundary tokenisation, so compound tags like `deep house` map to the `electronic` bucket via `house`, and `post-rock` correctly maps to `rock` (not `soundtrack` via `ost`).
+
+Genre buckets, in priority order: `soundtrack`, `classical`, `jazz`, `hip hop`, `metal`, `punk`, `country`, `blues`, `reggae`, `folk`, `electronic`, `ambient`, `rock`, `pop`, `rnb`, `indie`, `world`.
+
+Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `dreamy`, `aggressive`, `nostalgic`, `cinematic`, `ambient`, `instrumental`.
 
 ### Audio features reference
 
@@ -262,9 +288,10 @@ The sync produces `data/playlist_enriched.csv` with 37 columns:
 ## Known limitations
 
 - **Spotify Developer Mode** limits search to 10 results per request and imposes a daily quota. Use `--limit N` to spread large initial syncs over multiple days.
-- **Audio features restricted** — Spotify returns 403 on the `/audio-features` endpoint for most standard app types. The tool detects this and marks tracks as attempted so it won't retry. Popularity, genres, and other metadata still work.
+- **`/v1/audio-features`, `/v1/tracks`, `/v1/artists` blocked** — Spotify returns 403 on these endpoints for most standard (non-extended-access) app types since late 2024. Affected columns (`danceability`, `energy`, `valence`, `tempo`, `popularity`, `artist_genres`, …) stay empty unless your app passes Spotify's Extended Quota Mode review. The tool detects each 403, marks the relevant skip-flag, and stops retrying. **Sync still works** — Last.fm picks up the slack for genre/mood data.
 - **YT Music-exclusive tracks** (unreleased, region-locked, user uploads) will not have Spotify matches — these are tracked in `data/unmatched.csv`.
 - **ytmusicapi OAuth is broken** in v1.11.x — the tool uses browser-based authentication instead (stable, valid ~2 years).
+- **Last.fm tag coverage on niche music** — track-level tags (`lastfm_tags`) are user-submitted and sparse for game OSTs, regional uploads, and remix edits. Artist-level tags (`artist_tags`) are far denser; the tool prefers them and falls back to track-level only for play-count/listener data.
 
 ---
 
