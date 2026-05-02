@@ -488,7 +488,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             print("Fetching Last.fm artist tags for new matches...")
             backfill_lastfm_artist_tags(lastfm_key, already_matched)
         else:
-            logger.info("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
+            print("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
 
     # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
@@ -683,7 +683,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
 
     genre_n = sum(1 for t in tracks if t.primary_genre)
     mood_n = sum(1 for t in tracks if t.mood)
-    print(f"\nClassification results:")
+    print("\nClassification results:")
     print(f"  primary_genre: {genre_n}/{len(tracks)} ({100*genre_n/len(tracks):.1f}%)")
     print(f"  mood:          {mood_n}/{len(tracks)} ({100*mood_n/len(tracks):.1f}%)")
 
