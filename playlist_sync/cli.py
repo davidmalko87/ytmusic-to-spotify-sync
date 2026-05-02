@@ -34,8 +34,10 @@ from playlist_sync.differ import diff_tracks
 from playlist_sync.enricher import (
     apply_match_to_track,
     backfill_artist_genres,
+    backfill_lastfm_artist_tags,
     backfill_lastfm_data,
     backfill_track_metadata,
+    classify_all_tracks,
     enrich_with_audio_features,
 )
 from playlist_sync.matcher import match_track
@@ -58,16 +60,17 @@ from playlist_sync.ytmusic_client import (
 # ── Interactive menu ────────────────────────────────────────────────
 
 MENU_OPTIONS = [
-    ("1", "Setup YT Music auth",     "setup-ytmusic"),
-    ("2", "Import from CSV",         "import-csv"),
-    ("3", "Snapshot YT Music playlist", "snapshot"),
-    ("4", "Show diff (changes)",     "diff"),
-    ("5", "Full sync to Spotify",    "sync"),
-    ("6", "Sync from CSV file",      "sync-csv"),
-    ("7", "Retry unmatched tracks",  "retry-unmatched"),
-    ("8", "Enrich with Last.fm",     "lastfm"),
-    ("9", "Show status",             "status"),
-    ("0", "Exit",                    "exit"),
+    ("1",  "Setup YT Music auth",                   "setup-ytmusic"),
+    ("2",  "Import from CSV",                       "import-csv"),
+    ("3",  "Snapshot YT Music playlist",            "snapshot"),
+    ("4",  "Show diff (changes)",                   "diff"),
+    ("5",  "Full sync to Spotify",                  "sync"),
+    ("6",  "Sync from CSV file",                    "sync-csv"),
+    ("7",  "Retry unmatched tracks",                "retry-unmatched"),
+    ("8",  "Enrich with Last.fm",                   "lastfm"),
+    ("9",  "Classify genre + mood from tags",       "classify"),
+    ("10", "Show status",                           "status"),
+    ("0",  "Exit",                                  "exit"),
 ]
 
 
@@ -106,7 +109,7 @@ def interactive_menu() -> None:
 
         # Ask about dry-run for commands that support it
         dry_run = False
-        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched", "lastfm"):
+        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched", "lastfm", "classify"):
             try:
                 dr = input("Dry run? (y/N): ").strip().lower()
                 dry_run = dr in ("y", "yes")
@@ -121,6 +124,7 @@ def interactive_menu() -> None:
             dry_run=dry_run,
             csv=None,
             from_csv=None,
+            force=False,
         )
 
         if cmd == "sync-csv":
@@ -314,7 +318,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
-        not t.popularity or not t.artist_genres or not t.lastfm_playcount
+        not t.popularity or not t.artist_genres or not t.lastfm_playcount or not t.artist_tags
         for t in already_matched
         if t.has_spotify_match
     )
@@ -324,8 +328,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if already_matched and not args.dry_run:
         lastfm_key = config.get("LASTFM_API_KEY", "")
         if lastfm_key and needs_enrichment:
-            print("\nFetching Last.fm data...")
+            print("\nFetching Last.fm track data...")
             backfill_lastfm_data(lastfm_key, already_matched)
+            print("Fetching Last.fm artist tags...")
+            backfill_lastfm_artist_tags(lastfm_key, already_matched)
 
     if not needs_matching and not diff.removed and not needs_enrichment:
         # Still save if we just enriched
@@ -477,14 +483,19 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # previous runs were enriched in Step 5; this catches new matches)
         lastfm_key = config.get("LASTFM_API_KEY", "")
         if lastfm_key:
-            print("Fetching Last.fm data for new matches...")
+            print("Fetching Last.fm track data for new matches...")
             backfill_lastfm_data(lastfm_key, already_matched)
+            print("Fetching Last.fm artist tags for new matches...")
+            backfill_lastfm_artist_tags(lastfm_key, already_matched)
         else:
-            logger.info("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
+            print("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
 
-    # Step 8: Save outputs
+    # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
         all_tracks = already_matched + unmatched_tracks
+        print("\nClassifying genre and mood from tags...")
+        classify_all_tracks(all_tracks)
+
         write_enriched_csv(all_tracks)
         print(f"Enriched CSV updated: {ENRICHED_CSV}")
 
@@ -595,24 +606,93 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
         tracks = snapshot_tracks
         print(f"Loaded {len(tracks)} tracks from latest snapshot")
 
-    needs_lastfm = [t for t in tracks if not t.lastfm_playcount and t.title and t.artist]
-    print(f"Need Last.fm data: {len(needs_lastfm)}")
+    needs_track_data = [t for t in tracks if not t.lastfm_playcount and t.title and t.artist]
+    needs_artist_tags = [t for t in tracks if not t.artist_tags and t.artist]
+    print(f"Need Last.fm track data: {len(needs_track_data)}")
+    print(f"Need Last.fm artist tags: {len(needs_artist_tags)}")
 
-    if not needs_lastfm:
-        print("All tracks already have Last.fm data.")
+    if not needs_track_data and not needs_artist_tags:
+        print("All tracks already have Last.fm data and artist tags.")
         return
 
     if args.dry_run:
-        print(f"[DRY RUN] Would fetch Last.fm data for {len(needs_lastfm)} tracks")
+        unique_artists = len({t.artist.split(",")[0].strip() for t in needs_artist_tags if t.artist})
+        print(f"[DRY RUN] Would fetch Last.fm track data for {len(needs_track_data)} tracks")
+        print(f"[DRY RUN] Would fetch Last.fm artist tags for {unique_artists} unique artists")
         return
 
-    backfill_lastfm_data(lastfm_key, tracks)
+    if needs_track_data:
+        print("\nFetching Last.fm track data (playcount, listeners, track tags)...")
+        backfill_lastfm_data(lastfm_key, tracks)
+
+    if needs_artist_tags:
+        print("\nFetching Last.fm artist tags (denser genre coverage)...")
+        backfill_lastfm_artist_tags(lastfm_key, tracks)
+
+    print("\nClassifying genre and mood from tag pool...")
+    classify_all_tracks(tracks)
 
     write_enriched_csv(tracks)
     print(f"Enriched CSV updated: {ENRICHED_CSV}")
 
-    enriched = sum(1 for t in tracks if t.lastfm_playcount)
-    print(f"\nLast.fm enrichment complete: {enriched}/{len(tracks)} tracks have data")
+    track_enriched = sum(1 for t in tracks if t.lastfm_playcount)
+    artist_enriched = sum(1 for t in tracks if t.artist_tags)
+    genre_classified = sum(1 for t in tracks if t.primary_genre)
+    mood_classified = sum(1 for t in tracks if t.mood)
+    print("\nLast.fm enrichment complete:")
+    print(f"  Track data:    {track_enriched}/{len(tracks)} ({100*track_enriched/len(tracks):.1f}%)")
+    print(f"  Artist tags:   {artist_enriched}/{len(tracks)} ({100*artist_enriched/len(tracks):.1f}%)")
+    print(f"  primary_genre: {genre_classified}/{len(tracks)} ({100*genre_classified/len(tracks):.1f}%)")
+    print(f"  mood:          {mood_classified}/{len(tracks)} ({100*mood_classified/len(tracks):.1f}%)")
+
+
+def cmd_classify(args: argparse.Namespace) -> None:
+    """Re-derive primary_genre and mood columns from existing tags.
+
+    Pure local computation — no API calls. Useful after you've gathered
+    Last.fm tags and want to re-bucket them, or after the classifier
+    keyword maps are updated.
+    """
+    setup_logging(args.verbose)
+    ensure_dirs()
+
+    if not ENRICHED_CSV.exists():
+        print("Error: no enriched CSV found. Run sync or import-csv first.")
+        sys.exit(1)
+
+    tracks = read_enriched_csv()
+    print(f"Loaded {len(tracks)} tracks from enriched CSV")
+
+    # Force re-classification by clearing the existing values first
+    if getattr(args, "force", False):
+        for t in tracks:
+            t.primary_genre = ""
+            t.mood = ""
+        print("Force mode: cleared existing primary_genre and mood values")
+
+    classify_all_tracks(tracks)
+
+    if args.dry_run:
+        genre_n = sum(1 for t in tracks if t.primary_genre)
+        mood_n = sum(1 for t in tracks if t.mood)
+        print(f"[DRY RUN] Would classify {genre_n} primary_genre and {mood_n} mood values")
+        return
+
+    write_enriched_csv(tracks)
+    print(f"Enriched CSV updated: {ENRICHED_CSV}")
+
+    genre_n = sum(1 for t in tracks if t.primary_genre)
+    mood_n = sum(1 for t in tracks if t.mood)
+    print("\nClassification results:")
+    print(f"  primary_genre: {genre_n}/{len(tracks)} ({100*genre_n/len(tracks):.1f}%)")
+    print(f"  mood:          {mood_n}/{len(tracks)} ({100*mood_n/len(tracks):.1f}%)")
+
+    # Show genre distribution
+    from collections import Counter
+    genres = Counter(t.primary_genre for t in tracks if t.primary_genre)
+    print("\nGenre distribution:")
+    for g, n in genres.most_common(10):
+        print(f"  {g:15s}  {n}")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -706,6 +786,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_lastfm = sub.add_parser("lastfm", help="Enrich matched tracks with Last.fm data")
     p_lastfm.add_argument("--dry-run", action="store_true", help="Preview without writing")
 
+    p_classify = sub.add_parser("classify", help="Derive primary_genre and mood from existing tags (no API calls)")
+    p_classify.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_classify.add_argument("--force", action="store_true", help="Re-classify even tracks that already have values")
+
     sub.add_parser("status", help="Show sync statistics")
 
     return parser
@@ -721,6 +805,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "sync": cmd_sync,
         "retry-unmatched": cmd_retry_unmatched,
         "lastfm": cmd_lastfm,
+        "classify": cmd_classify,
         "status": cmd_status,
     }
     handler = commands.get(args.command)
