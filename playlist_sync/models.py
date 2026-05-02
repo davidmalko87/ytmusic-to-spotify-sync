@@ -56,7 +56,19 @@ class Track:
     # Last.fm enrichment
     lastfm_playcount: int = 0
     lastfm_listeners: int = 0
-    lastfm_tags: str = ""
+    lastfm_tags: str = ""          # From track.getInfo (sparse for niche music)
+    artist_tags: str = ""          # From artist.getInfo (much denser coverage)
+    tag_source: str = ""           # Which source filled artist_tags: "lastfm_artist", etc.
+    lastfm_attempted: bool = False # True once we've tried Last.fm artist lookup
+                                   #   (skips re-querying empty-tag artists every run)
+
+    # Derived classifications (computed from tag pool, no API calls)
+    primary_genre: str = ""        # Single broad genre bucket: "electronic", "rock", ...
+    mood: str = ""                 # Comma-joined moods detected in tags
+
+    # Spotify backfill skip-flags (endpoint blocked by 403 — don't retry)
+    spotify_metadata_attempted: bool = False  # /v1/tracks endpoint
+    spotify_genres_attempted: bool = False    # /v1/artists endpoint
 
     # Matching metadata
     match_method: str = ""
@@ -114,6 +126,13 @@ class Track:
             "lastfm_playcount": str(self.lastfm_playcount) if self.lastfm_playcount else "",
             "lastfm_listeners": str(self.lastfm_listeners) if self.lastfm_listeners else "",
             "lastfm_tags": self.lastfm_tags,
+            "artist_tags": self.artist_tags,
+            "tag_source": self.tag_source,
+            "lastfm_attempted": "true" if self.lastfm_attempted else "",
+            "primary_genre": self.primary_genre,
+            "mood": self.mood,
+            "spotify_metadata_attempted": "true" if self.spotify_metadata_attempted else "",
+            "spotify_genres_attempted": "true" if self.spotify_genres_attempted else "",
             "match_method": self.match_method,
             "match_confidence": f"{self.match_confidence:.2f}" if self.match_confidence else "",
             "first_synced": self.first_synced,
@@ -159,6 +178,13 @@ class Track:
             lastfm_playcount=int(row["lastfm_playcount"]) if row.get("lastfm_playcount") else 0,
             lastfm_listeners=int(row["lastfm_listeners"]) if row.get("lastfm_listeners") else 0,
             lastfm_tags=row.get("lastfm_tags", ""),
+            artist_tags=row.get("artist_tags", ""),
+            tag_source=row.get("tag_source", ""),
+            lastfm_attempted=row.get("lastfm_attempted", "").lower() == "true",
+            primary_genre=row.get("primary_genre", ""),
+            mood=row.get("mood", ""),
+            spotify_metadata_attempted=row.get("spotify_metadata_attempted", "").lower() == "true",
+            spotify_genres_attempted=row.get("spotify_genres_attempted", "").lower() == "true",
             match_method=row.get("match_method", ""),
             match_confidence=float(row["match_confidence"]) if row.get("match_confidence") else 0.0,
             first_synced=row.get("first_synced", ""),
