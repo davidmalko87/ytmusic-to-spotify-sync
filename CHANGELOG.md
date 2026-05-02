@@ -6,6 +6,35 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.6.0] - 2026-05-02
+
+### Added
+- **Last.fm artist tags** (`artist_tags` column) — switches from `track.getInfo` to `artist.getInfo` to lift useful tag coverage from ~14 % to **~93 %** on niche libraries. Cached by unique artist name (≈ 4× speedup vs per-track lookups).
+- **`primary_genre` column** — derived locally from the tag pool. 17 genre buckets (electronic, rock, soundtrack, classical, jazz, hip hop, metal, folk, ambient, …). No API calls.
+- **`mood` column** — multi-label mood detection from tag keywords (chill, ambient, cinematic, epic, energetic, sad, dark, dreamy, …).
+- **`tag_source` column** — records where each row's tags came from (`lastfm_artist`, etc.) so future sources (MusicBrainz, Discogs) can be layered cleanly.
+- **`classify` command** (option `[9]` in interactive menu) — re-derives `primary_genre` and `mood` from existing tags. Pure-local, no API calls. Also runs automatically at the end of every `sync` and `lastfm` run. Use `--force` to re-classify rows that already have values.
+- **Skip-flags** to stop hammering dead endpoints on every sync:
+  - `lastfm_attempted` — set after `artist.getInfo` is tried, so artists with no community tags are not re-queried.
+  - `lastfm_track_attempted` — set after `track.getInfo` is tried, so tracks Last.fm doesn't know about are not re-queried.
+  - `spotify_metadata_attempted` — set after the `/v1/tracks` endpoint is hit (often 403 for non-extended apps).
+  - `spotify_genres_attempted` — same, for `/v1/artists`.
+- New helpers in `lastfm_client.py`: `get_artist_info()`, `get_artists_info_batch()` (deduplicates input).
+- New enricher functions: `backfill_lastfm_artist_tags()`, `classify_track()`, `classify_all_tracks()`.
+
+### Fixed
+- Pre-existing latent `NameError` in `cli.py` — the Last.fm "skip" branch referenced an undefined `logger`. Replaced with `print()` to match the file's style.
+- Removed an extraneous `f` prefix on a string with no placeholders (`F541`).
+- Word-boundary tokenisation in the genre classifier — earlier substring matching produced false hits like `post-rock` → `ost` → `soundtrack`. Now tags are split on commas (whole-tag set) and on spaces/hyphens (token set), matched exactly.
+- `backfill_lastfm_data` now respects `lastfm_track_attempted` so already-failed track lookups are not retried on every sync (saves ~1 min/run for libraries with unmatchable tracks).
+
+### Changed
+- Enriched CSV grew to **48 columns** (was 37): added `artist_tags`, `tag_source`, `lastfm_attempted`, `lastfm_track_attempted`, `primary_genre`, `mood`, `spotify_metadata_attempted`, `spotify_genres_attempted`.
+- Sync flow now runs Last.fm artist tags + classification **before** writing the CSV, so a single `sync` populates everything.
+- Interactive menu adds `[9] Classify genre + mood from tags` and shifts `Show status` to `[10]`.
+
+---
+
 ## [0.5.0] - 2026-04-13
 
 ### Added
