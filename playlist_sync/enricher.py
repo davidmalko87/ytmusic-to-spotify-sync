@@ -392,13 +392,16 @@ def backfill_lastfm_data(
     Uses artist + track name matching (no Spotify IDs needed).
     Only fetches for tracks that don't already have Last.fm data.
     """
+    # Skip tracks we've already tried via track.getInfo, even if they returned
+    # nothing. Without this, the ~5% of tracks that genuinely don't exist on
+    # Last.fm get re-queried on every sync run forever.
     needs_lastfm = [
         t for t in tracks
-        if not t.lastfm_playcount and t.title and t.artist
+        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
     ]
 
     if not needs_lastfm:
-        logger.info("All tracks already have Last.fm data")
+        logger.info("All tracks already have Last.fm data or were attempted")
         return tracks
 
     # Build lookup pairs
@@ -420,6 +423,10 @@ def backfill_lastfm_data(
             tags = info.get("tags", [])
             t.lastfm_tags = ", ".join(tags[:5]) if tags else ""
             enriched_count += 1
+
+    # Mark all attempted so we don't retry tracks Last.fm doesn't know about
+    for t in needs_lastfm:
+        t.lastfm_track_attempted = True
 
     logger.info("Applied Last.fm data to %d/%d tracks", enriched_count, len(needs_lastfm))
     return tracks

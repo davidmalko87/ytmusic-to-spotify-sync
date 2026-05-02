@@ -56,11 +56,11 @@ class Track:
     # Last.fm enrichment
     lastfm_playcount: int = 0
     lastfm_listeners: int = 0
-    lastfm_tags: str = ""          # From track.getInfo (sparse for niche music)
-    artist_tags: str = ""          # From artist.getInfo (much denser coverage)
-    tag_source: str = ""           # Which source filled artist_tags: "lastfm_artist", etc.
-    lastfm_attempted: bool = False # True once we've tried Last.fm artist lookup
-                                   #   (skips re-querying empty-tag artists every run)
+    lastfm_tags: str = ""              # From track.getInfo (sparse for niche music)
+    artist_tags: str = ""              # From artist.getInfo (much denser coverage)
+    tag_source: str = ""               # Which source filled artist_tags
+    lastfm_attempted: bool = False     # True once we've tried artist.getInfo
+    lastfm_track_attempted: bool = False  # True once we've tried track.getInfo
 
     # Derived classifications (computed from tag pool, no API calls)
     primary_genre: str = ""        # Single broad genre bucket: "electronic", "rock", ...
@@ -129,6 +129,7 @@ class Track:
             "artist_tags": self.artist_tags,
             "tag_source": self.tag_source,
             "lastfm_attempted": "true" if self.lastfm_attempted else "",
+            "lastfm_track_attempted": "true" if self.lastfm_track_attempted else "",
             "primary_genre": self.primary_genre,
             "mood": self.mood,
             "spotify_metadata_attempted": "true" if self.spotify_metadata_attempted else "",
@@ -181,6 +182,7 @@ class Track:
             artist_tags=row.get("artist_tags", ""),
             tag_source=row.get("tag_source", ""),
             lastfm_attempted=row.get("lastfm_attempted", "").lower() == "true",
+            lastfm_track_attempted=row.get("lastfm_track_attempted", "").lower() == "true",
             primary_genre=row.get("primary_genre", ""),
             mood=row.get("mood", ""),
             spotify_metadata_attempted=row.get("spotify_metadata_attempted", "").lower() == "true",

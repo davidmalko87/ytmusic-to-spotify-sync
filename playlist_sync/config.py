@@ -33,7 +33,7 @@ ENRICHED_COLUMNS = [
     "audio_features_fetched",
     "popularity", "artist_genres", "album_type", "track_number",
     "lastfm_playcount", "lastfm_listeners", "lastfm_tags",
-    "artist_tags", "tag_source", "lastfm_attempted",
+    "artist_tags", "tag_source", "lastfm_attempted", "lastfm_track_attempted",
     "primary_genre", "mood",
     "spotify_metadata_attempted", "spotify_genres_attempted",
     "match_method", "match_confidence", "first_synced", "last_synced",
