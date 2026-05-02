@@ -606,8 +606,14 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
         tracks = snapshot_tracks
         print(f"Loaded {len(tracks)} tracks from latest snapshot")
 
-    needs_track_data = [t for t in tracks if not t.lastfm_playcount and t.title and t.artist]
-    needs_artist_tags = [t for t in tracks if not t.artist_tags and t.artist]
+    needs_track_data = [
+        t for t in tracks
+        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
+    ]
+    needs_artist_tags = [
+        t for t in tracks
+        if not t.artist_tags and t.artist and not t.lastfm_attempted
+    ]
     print(f"Need Last.fm track data: {len(needs_track_data)}")
     print(f"Need Last.fm artist tags: {len(needs_artist_tags)}")
 
