@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from playlist_sync.config import ENRICHED_COLUMNS, ENRICHED_CSV, UNMATCHED_CSV
+from playlist_sync.config import ENRICHED_COLUMNS, ENRICHED_CSV, SKIPPED_CSV, UNMATCHED_CSV
 from playlist_sync.models import Track
 
 logger = logging.getLogger("playlist_sync")
@@ -92,3 +92,31 @@ def write_unmatched_csv(tracks: list[Track], path: Path | None = None) -> None:
     _safe_csv_write(df, path)
 
     logger.info("Wrote %d unmatched tracks to: %s", len(tracks), path)
+
+
+def write_skipped_csv(tracks: list[Track], path: Path | None = None) -> None:
+    """Write tracks that were filtered out before matching (skip_reason set).
+
+    These are tracks the matcher decided not to send to Spotify search at
+    all (e.g. YT Music tracks missing album metadata, typically YouTube
+    uploads that wouldn't have a real Spotify equivalent).
+    """
+    path = path or SKIPPED_CSV
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = [
+        {
+            "title": t.title,
+            "artist": t.artist,
+            "album": t.album,
+            "trackId": t.track_id,
+            "url": t.url,
+            "platform": t.platform,
+            "skip_reason": t.skip_reason,
+        }
+        for t in tracks
+    ]
+    df = pd.DataFrame(rows)
+    _safe_csv_write(df, path)
+
+    logger.info("Wrote %d skipped tracks to: %s", len(tracks), path)

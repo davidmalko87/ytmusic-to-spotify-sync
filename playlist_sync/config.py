@@ -17,8 +17,13 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
+LIKES_SNAPSHOTS_DIR = DATA_DIR / "snapshots" / "likes"
+DEBUG_DIR = DATA_DIR / "debug"
 ENRICHED_CSV = DATA_DIR / "playlist_enriched.csv"
 UNMATCHED_CSV = DATA_DIR / "unmatched.csv"
+SKIPPED_CSV = DATA_DIR / "skipped.csv"
+LIKES_ENRICHED_CSV = DATA_DIR / "likes_enriched.csv"
+LIKES_UNMATCHED_CSV = DATA_DIR / "likes_unmatched.csv"
 LOG_FILE = PROJECT_ROOT / "playlist_sync.log"
 
 # Enriched CSV columns (original + enrichment)
@@ -36,6 +41,7 @@ ENRICHED_COLUMNS = [
     "artist_tags", "tag_source", "lastfm_attempted", "lastfm_track_attempted",
     "primary_genre", "mood",
     "spotify_metadata_attempted", "spotify_genres_attempted",
+    "skip_reason",
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 
@@ -110,3 +116,5 @@ def require_ytmusic_config(config: dict[str, str]) -> None:
 def ensure_dirs() -> None:
     """Create data directories if they don't exist."""
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    LIKES_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)

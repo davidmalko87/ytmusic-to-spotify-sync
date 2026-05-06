@@ -6,6 +6,30 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.7.0] - 2026-05-07
+
+### Added
+- **`sync-likes` command** (menu option `[10]`) — mirrors YT Music liked songs to the user's Spotify "Liked Songs" library. Uses the same 3-pass matcher; reuses Spotify URIs already discovered during playlist sync to avoid duplicate API calls. Maintains a separate snapshot under `data/snapshots/likes/` so likes-diff state never collides with playlist-diff state. Supports `--dry-run`.
+- **`export` command** (menu option `[11]`) — exports the enriched CSV as portable JSON (`data/playlist_enriched.json` by default; `--output PATH` to override). One JSON object per track, all 49 enrichment fields included. Easier to feed into `jq`, dashboards, or other tools than the CSV.
+- **Per-run debug stats JSON** — every `sync` run now writes `data/debug/run_<timestamp>.json` (and a rolling `latest.json`) with totals, diff deltas, match rate, method distribution, average confidence, skip-reason histogram, and a few unmatched/skipped examples. Useful for graphing sync quality over time.
+- **`skip_reason` column** + `data/skipped.csv` — YT Music tracks without album metadata (typically YouTube uploads, fan edits, mixes) are now filtered out before search. Saves ~1.5 s × N skipped tracks of Spotify API time, removes noise from `unmatched.csv`, and keeps a per-track audit trail of why each was skipped.
+- New Spotify endpoints: `get_saved_tracks`, `add_saved_tracks`, `remove_saved_tracks` (all batched at 50 IDs/call, with rate-limit retry on `add`).
+- New YT Music endpoints: `fetch_liked_tracks`, `save_likes_snapshot`, `load_latest_likes_snapshot`.
+- New CSV writer: `write_skipped_csv`.
+- New config paths: `LIKES_SNAPSHOTS_DIR`, `DEBUG_DIR`, `SKIPPED_CSV`, `LIKES_ENRICHED_CSV`, `LIKES_UNMATCHED_CSV`.
+
+### Changed
+- **Spotify OAuth scope expanded** to include `user-library-read` and `user-library-modify` for likes sync. **One-time re-authorization** required on first launch after upgrade — spotipy refreshes the cached token automatically.
+- Enriched CSV grew to **49 columns** (was 48): added `skip_reason`.
+- Sync flow now writes `skipped.csv` alongside `unmatched.csv` for the new no-album skip filter.
+- Interactive menu adds `[10] Sync Liked Songs`, `[11] Export to JSON`, and shifts `Show status` to `[12]`.
+
+### Notes
+- The skip-no-album filter only applies to YT Music sources. Tracks imported from CSV with empty album fields are still tried unless explicitly marked.
+- Likes sync reuses match results from `playlist_enriched.csv` when fingerprints overlap, so a track already matched in the playlist sync doesn't need to be re-searched for likes.
+
+---
+
 ## [0.6.0] - 2026-05-02
 
 ### Added

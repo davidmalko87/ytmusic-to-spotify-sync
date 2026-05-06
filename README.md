@@ -3,7 +3,7 @@
 > Automatically sync your YouTube Music playlists to Spotify — with smart track matching, diff-based updates, and full metadata enrichment.
 
 [![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
@@ -139,7 +139,9 @@ python playlist_sync.py
   [7]  Retry unmatched tracks
   [8]  Enrich with Last.fm
   [9]  Classify genre + mood from tags
-  [10] Show status
+  [10] Sync Liked Songs (YTM <-> Spotify)
+  [11] Export enriched data to JSON
+  [12] Show status
   [0]  Exit
 ```
 
@@ -157,6 +159,10 @@ python playlist_sync.py retry-unmatched        # Retry previously failed matches
 python playlist_sync.py lastfm                 # Re-run Last.fm enrichment on the existing CSV
 python playlist_sync.py classify               # Re-derive primary_genre and mood from tags
 python playlist_sync.py classify --force       # Re-classify even rows that already have values
+python playlist_sync.py sync-likes             # Mirror YT Music liked songs to Spotify Liked Songs
+python playlist_sync.py sync-likes --dry-run   # Preview likes-sync changes
+python playlist_sync.py export                 # Export enriched CSV as JSON (default: data/playlist_enriched.json)
+python playlist_sync.py export -o my_data.json # Custom output path
 python playlist_sync.py status                 # Show sync statistics
 ```
 
@@ -229,7 +235,7 @@ ytmusic-to-spotify-sync/
 
 ## Output: enriched CSV
 
-The sync produces `data/playlist_enriched.csv` with **48 columns**:
+The sync produces `data/playlist_enriched.csv` with **49 columns**:
 
 | Column | Source |
 |--------|--------|
@@ -251,6 +257,7 @@ The sync produces `data/playlist_enriched.csv` with **48 columns**:
 | `tag_source` | Which source filled `artist_tags` (`lastfm_artist`, …) |
 | `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm endpoints already attempted |
 | `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
+| `skip_reason` | Why the matcher pre-filtered this track (e.g. `no_album` for YT Music tracks lacking album metadata) — set means no Spotify search was attempted |
 | **`primary_genre`** | Single broad genre bucket (`electronic`, `rock`, `soundtrack`, …) — derived locally from tags |
 | **`mood`** | Multi-label mood (`chill`, `epic`, `cinematic`, …) — derived locally from tags |
 | `match_method`, `match_confidence` | Matching diagnostics |
@@ -282,6 +289,36 @@ Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `
 | `key` | 0 – 11 | Pitch class (0 = C, 1 = C♯, …, 11 = B) |
 | `mode` | 0 or 1 | Modality (0 = minor, 1 = major) |
 | `time_signature` | int | Estimated beats per bar |
+
+---
+
+## Liked songs sync
+
+```bash
+python playlist_sync.py sync-likes
+```
+
+Mirrors your YT Music **Liked Songs** to Spotify's **Liked Songs** library (`/me/tracks`). Uses the same 3-pass matcher and reuses Spotify URIs already discovered during regular playlist sync, so a track present in both places is matched only once.
+
+Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state never collides with playlist-diff state. Outputs:
+- `data/likes_enriched.csv` — matched + unmatched likes with the same 49-column schema
+- `data/likes_unmatched.csv` — likes that couldn't be matched
+
+**One-time re-authorization required** on first launch after upgrading to 0.7.0 — the new scope (`user-library-modify`) needs your consent. spotipy refreshes the cached token automatically.
+
+## JSON export
+
+```bash
+python playlist_sync.py export                       # writes data/playlist_enriched.json
+python playlist_sync.py export -o /tmp/my_data.json  # custom path
+```
+
+Produces a structured JSON document — `{ exported_at, track_count, tracks: [{...}, ...] }` — with all 49 enrichment fields per track. Easier to feed into `jq`, dashboards, or other programmatic tools than the CSV.
+
+## Skip filter & debug stats
+
+- **Skip filter**: YT Music tracks with no album metadata (typically YouTube uploads, fan edits, mixes) are filtered out before Spotify search and written to `data/skipped.csv` with `skip_reason=no_album`. Saves API time and keeps `unmatched.csv` focused on tracks that genuinely should match but didn't.
+- **Debug stats**: every `sync` run writes `data/debug/run_<timestamp>.json` (and a rolling `latest.json`) with totals, diff deltas, match rate, method distribution, average confidence, skip-reason histogram, and a few unmatched/skipped examples. Useful for graphing sync quality over time or feeding into a monitoring dashboard.
 
 ---
 

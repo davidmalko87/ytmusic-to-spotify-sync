@@ -14,8 +14,12 @@ from pathlib import Path
 from tqdm import tqdm
 
 from playlist_sync.config import (
+    DEBUG_DIR,
     ENRICHED_CSV,
+    LIKES_ENRICHED_CSV,
+    LIKES_UNMATCHED_CSV,
     MATCH_CACHE,
+    SKIPPED_CSV,
     SNAPSHOTS_DIR,
     UNMATCHED_CSV,
     ensure_dirs,
@@ -28,6 +32,7 @@ from playlist_sync.csv_manager import (
     read_enriched_csv,
     read_source_csv,
     write_enriched_csv,
+    write_skipped_csv,
     write_unmatched_csv,
 )
 from playlist_sync.differ import diff_tracks
@@ -44,14 +49,19 @@ from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
 from playlist_sync.spotify_client import (
     RateLimitError,
+    add_saved_tracks,
     add_tracks_to_playlist,
     get_spotify_client,
+    remove_saved_tracks,
     remove_tracks_from_playlist,
 )
 from playlist_sync.utils import setup_logging
 from playlist_sync.ytmusic_client import (
+    fetch_liked_tracks,
     fetch_playlist_tracks,
+    load_latest_likes_snapshot,
     load_latest_snapshot,
+    save_likes_snapshot,
     save_snapshot,
     setup_browser_auth,
 )
@@ -69,7 +79,9 @@ MENU_OPTIONS = [
     ("7",  "Retry unmatched tracks",                "retry-unmatched"),
     ("8",  "Enrich with Last.fm",                   "lastfm"),
     ("9",  "Classify genre + mood from tags",       "classify"),
-    ("10", "Show status",                           "status"),
+    ("10", "Sync Liked Songs (YTM <- -> Spotify)",  "sync-likes"),
+    ("11", "Export enriched data to JSON",          "export"),
+    ("12", "Show status",                           "status"),
     ("0",  "Exit",                                  "exit"),
 ]
 
@@ -109,7 +121,10 @@ def interactive_menu() -> None:
 
         # Ask about dry-run for commands that support it
         dry_run = False
-        if cmd in ("import-csv", "snapshot", "sync", "sync-csv", "retry-unmatched", "lastfm", "classify"):
+        if cmd in (
+            "import-csv", "snapshot", "sync", "sync-csv",
+            "retry-unmatched", "lastfm", "classify", "export", "sync-likes",
+        ):
             try:
                 dr = input("Dry run? (y/N): ").strip().lower()
                 dry_run = dr in ("y", "yes")
@@ -125,6 +140,7 @@ def interactive_menu() -> None:
             csv=None,
             from_csv=None,
             force=False,
+            output=None,
         )
 
         if cmd == "sync-csv":
@@ -143,6 +159,82 @@ def interactive_menu() -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
+
+
+# ── Debug stats writer ──────────────────────────────────────────────
+
+def _write_debug_stats(
+    current: list[Track],
+    already_matched: list[Track],
+    matched_results: list,
+    unmatched: list[Track],
+    skipped: list[Track],
+    diff,
+) -> None:
+    """Write per-run sync stats as structured JSON for downstream analysis.
+
+    Lands in `data/debug/run_<timestamp>.json`. Inspired by SyncDisBoi's
+    debug mode but kept lightweight — captures match rate, method
+    distribution, and the deltas from the diff engine. Useful for
+    plotting sync quality over time or feeding into a dashboard.
+    """
+    import json
+    from datetime import datetime
+    ensure_dirs()
+
+    methods: dict[str, int] = {}
+    confidences: list[float] = []
+    for r in matched_results:
+        methods[r.method] = methods.get(r.method, 0) + 1
+        confidences.append(r.confidence)
+
+    payload = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "totals": {
+            "current": len(current),
+            "already_matched": len(already_matched),
+            "newly_matched": len(matched_results),
+            "unmatched": len(unmatched),
+            "skipped": len(skipped),
+        },
+        "diff": {
+            "added": len(diff.added),
+            "removed": len(diff.removed),
+            "unchanged": len(diff.unchanged),
+        },
+        "match": {
+            "rate_pct": round(
+                100.0 * (len(already_matched) + len(matched_results)) / max(len(current), 1),
+                2,
+            ),
+            "methods": methods,
+            "avg_confidence": (
+                round(sum(confidences) / len(confidences), 3) if confidences else None
+            ),
+        },
+        "skip_reasons": {},
+        "unmatched_examples": [
+            {"title": t.title, "artist": t.artist} for t in unmatched[:10]
+        ],
+        "skipped_examples": [
+            {"title": t.title, "artist": t.artist, "reason": t.skip_reason}
+            for t in skipped[:10]
+        ],
+    }
+
+    # Group skip reasons (currently only "no_album", but extensible)
+    for t in skipped:
+        reason = t.skip_reason or "unknown"
+        payload["skip_reasons"][reason] = payload["skip_reasons"].get(reason, 0) + 1
+
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    out = DEBUG_DIR / f"run_{timestamp}.json"
+    out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Also keep a `latest.json` symlink-like file
+    latest = DEBUG_DIR / "latest.json"
+    latest.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"Debug stats: {out.name}")
 
 
 # ── Match cache for resume after rate limits ────────────────────────
@@ -304,6 +396,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # Step 4: Separate already-matched from needs-matching
     needs_matching: list[Track] = []
     already_matched: list[Track] = []
+    skipped_tracks: list[Track] = []
 
     for track in current:
         fp = track.fingerprint
@@ -314,7 +407,31 @@ def cmd_sync(args: argparse.Namespace) -> None:
         else:
             needs_matching.append(track)
 
-    print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}")
+    # Skip-filter: YT Music tracks without album metadata are typically
+    # YouTube uploads, fan edits, mixes, or other content without a real
+    # Spotify equivalent. Filtering them out before search saves ~3 s
+    # per track in API time and keeps unmatched.csv focused on tracks
+    # that genuinely *should* match but didn't.
+    #
+    # If a previously-skipped track now has album metadata (user edited
+    # it in YT Music), the existing_map check above won't apply since
+    # skipped tracks aren't in already_matched, so it'll be re-evaluated
+    # here naturally.
+    filtered: list[Track] = []
+    for track in needs_matching:
+        if track.platform == "ytmusic" and not track.album.strip():
+            track.skip_reason = "no_album"
+            skipped_tracks.append(track)
+        else:
+            filtered.append(track)
+    needs_matching = filtered
+
+    if skipped_tracks:
+        print(f"Skipped {len(skipped_tracks)} track(s) with no album metadata "
+              f"(YouTube uploads / fan edits) — written to skipped.csv")
+
+    print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}, "
+          f"skipped: {len(skipped_tracks)}")
 
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
@@ -492,7 +609,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
-        all_tracks = already_matched + unmatched_tracks
+        all_tracks = already_matched + unmatched_tracks + skipped_tracks
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
@@ -503,8 +620,23 @@ def cmd_sync(args: argparse.Namespace) -> None:
             write_unmatched_csv(unmatched_tracks)
             print(f"Unmatched tracks saved: {UNMATCHED_CSV}")
 
+        if skipped_tracks:
+            write_skipped_csv(skipped_tracks)
+            print(f"Skipped tracks saved: {SKIPPED_CSV}")
+
         save_snapshot(current)
         print("Snapshot updated.")
+
+        # Per-run debug stats — structured JSON for downstream analysis
+        # (e.g. plotting match rate over time, monitoring sync health).
+        _write_debug_stats(
+            current=current,
+            already_matched=already_matched,
+            matched_results=matched_results,
+            unmatched=unmatched_tracks,
+            skipped=skipped_tracks,
+            diff=diff,
+        )
 
     _clear_match_cache()
 
@@ -701,6 +833,180 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"  {g:15s}  {n}")
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export the enriched CSV as portable JSON.
+
+    Produces a structured JSON file that's easier to feed into other tools
+    (jq, programmatic analysis, sharing) than the 48-column CSV. Each
+    track becomes a JSON object with all enrichment fields.
+    """
+    setup_logging(args.verbose)
+    ensure_dirs()
+
+    if not ENRICHED_CSV.exists():
+        print("Error: no enriched CSV found. Run sync first.")
+        sys.exit(1)
+
+    tracks = read_enriched_csv()
+    print(f"Loaded {len(tracks)} tracks from enriched CSV")
+
+    output_path = Path(args.output) if args.output else (ENRICHED_CSV.parent / "playlist_enriched.json")
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would export {len(tracks)} tracks to {output_path}")
+        return
+
+    import json
+    from datetime import datetime
+    payload = {
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "track_count": len(tracks),
+        "tracks": [t.to_csv_row() for t in tracks],
+    }
+    output_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    size_kb = output_path.stat().st_size / 1024
+    print(f"Exported {len(tracks)} tracks to {output_path} ({size_kb:.1f} KB)")
+
+
+def cmd_sync_likes(args: argparse.Namespace) -> None:
+    """Mirror YT Music liked songs into the user's Spotify Liked Songs library.
+
+    Uses the same 3-pass matcher as the playlist sync but operates on YT
+    Music's implicit "LM" playlist and Spotify's `/me/tracks` endpoint
+    (saved tracks). Maintains a separate snapshot under
+    `data/snapshots/likes/` so likes-diff state never collides with
+    playlist-diff state.
+
+    Adds tracks newly liked on YT Music; removes tracks unliked on YT
+    Music (only if their Spotify match is known from a previous sync).
+    """
+    setup_logging(args.verbose)
+    config = load_config()
+    require_spotify_config(config)
+    require_ytmusic_config(config)
+    ensure_dirs()
+
+    # Step 1: fetch current YTM likes
+    print("Fetching YT Music liked songs...")
+    current = fetch_liked_tracks(config["YTMUSIC_AUTH_FILE"])
+    print(f"Fetched {len(current)} liked songs")
+
+    # Step 2: load previous likes snapshot for diff
+    previous = load_latest_likes_snapshot()
+    diff = diff_tracks(current, previous)
+    print(f"Likes diff: {diff.summary()}")
+
+    if not diff.added and not diff.removed:
+        if not args.dry_run:
+            save_likes_snapshot(current)
+        print("Nothing to do.")
+        return
+
+    # Step 3: load existing likes-enriched data + main enriched CSV.
+    # The main enriched CSV is reused as a match cache: if a track is
+    # already matched in the playlist sync, we don't need to re-match it
+    # for likes — same Spotify URI applies.
+    likes_existing = read_enriched_csv(LIKES_ENRICHED_CSV)
+    main_existing = read_enriched_csv()
+    fingerprint_to_uri: dict[str, str] = {}
+    for t in likes_existing + main_existing:
+        if t.has_spotify_match:
+            fingerprint_to_uri[t.fingerprint] = t.spotify_uri
+
+    # Step 4: classify added tracks — already matched (URI known) vs needs-search
+    sp = get_spotify_client(config)
+    matched_uris: list[str] = []
+    matched_likes: list[Track] = []
+    unmatched_likes: list[Track] = []
+
+    needs_search: list[Track] = []
+    for track in diff.added:
+        uri = fingerprint_to_uri.get(track.fingerprint, "")
+        if uri:
+            track.spotify_uri = uri
+            track.match_method = "reused_from_playlist"
+            track.match_confidence = 1.0
+            matched_uris.append(uri)
+            matched_likes.append(track)
+        else:
+            needs_search.append(track)
+
+    if matched_uris:
+        print(f"Reused {len(matched_uris)} match(es) from existing enriched data")
+
+    # Step 5: search Spotify for the rest
+    if needs_search:
+        # Skip-filter: same logic as cmd_sync
+        searchable = []
+        skipped = []
+        for t in needs_search:
+            if t.platform == "ytmusic" and not t.album.strip():
+                t.skip_reason = "no_album"
+                skipped.append(t)
+            else:
+                searchable.append(t)
+        if skipped:
+            print(f"Skipped {len(skipped)} track(s) with no album metadata")
+
+        print(f"\nMatching {len(searchable)} new likes to Spotify...")
+        try:
+            for track in tqdm(searchable, desc="Matching", unit="track"):
+                result = match_track(sp, track)
+                if result.matched:
+                    enriched = apply_match_to_track(track, result)
+                    matched_likes.append(enriched)
+                    matched_uris.append(result.spotify_uri)
+                else:
+                    unmatched_likes.append(track)
+        except RateLimitError as e:
+            print(f"Rate limited. Wait ~{e.retry_after / 3600:.1f}h and re-run.")
+            return
+
+    # Step 6: push to Spotify saved tracks
+    if matched_uris:
+        track_ids = [uri.split(":")[-1] for uri in matched_uris]
+        added = add_saved_tracks(sp, track_ids, dry_run=args.dry_run)
+        action = "[DRY RUN] Would save" if args.dry_run else "Saved"
+        print(f"{action} {added} tracks to Spotify Liked Songs")
+
+    # Step 7: remove tracks unliked on YTM (only if we know their Spotify ID)
+    if diff.removed:
+        remove_ids: list[str] = []
+        for t in diff.removed:
+            uri = fingerprint_to_uri.get(t.fingerprint, "")
+            if uri:
+                remove_ids.append(uri.split(":")[-1])
+        if remove_ids:
+            removed = remove_saved_tracks(sp, remove_ids, dry_run=args.dry_run)
+            action = "[DRY RUN] Would unsave" if args.dry_run else "Unsaved"
+            print(f"{action} {removed} tracks from Spotify Liked Songs")
+        else:
+            print(f"  ({len(diff.removed)} unliked on YTM but no Spotify match — skipping)")
+
+    # Step 8: persist likes_enriched.csv + snapshot
+    if not args.dry_run:
+        all_likes = matched_likes + unmatched_likes
+        if all_likes:
+            write_enriched_csv(all_likes, path=LIKES_ENRICHED_CSV)
+            print(f"Likes enriched CSV updated: {LIKES_ENRICHED_CSV}")
+        if unmatched_likes:
+            write_unmatched_csv(unmatched_likes, path=LIKES_UNMATCHED_CSV)
+            print(f"Unmatched likes saved: {LIKES_UNMATCHED_CSV}")
+        save_likes_snapshot(current)
+        print("Likes snapshot updated.")
+
+    print("\n--- Likes Sync Summary ---")
+    print(f"  Total YTM likes: {len(current)}")
+    print(f"  Newly added:     {len(diff.added)}")
+    print(f"  Newly removed:   {len(diff.removed)}")
+    print(f"  Matched:         {len(matched_likes)}")
+    print(f"  Unmatched:       {len(unmatched_likes)}")
+    print("\nLikes sync complete!")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show sync statistics."""
     setup_logging(args.verbose)
@@ -796,6 +1102,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_classify.add_argument("--dry-run", action="store_true", help="Preview without writing")
     p_classify.add_argument("--force", action="store_true", help="Re-classify even tracks that already have values")
 
+    p_export = sub.add_parser("export", help="Export the enriched CSV as portable JSON")
+    p_export.add_argument("--output", "-o", help="Output JSON path (default: data/playlist_enriched.json)")
+    p_export.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
+    p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
+    p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
     sub.add_parser("status", help="Show sync statistics")
 
     return parser
@@ -812,6 +1125,8 @@ def dispatch(args: argparse.Namespace) -> None:
         "retry-unmatched": cmd_retry_unmatched,
         "lastfm": cmd_lastfm,
         "classify": cmd_classify,
+        "export": cmd_export,
+        "sync-likes": cmd_sync_likes,
         "status": cmd_status,
     }
     handler = commands.get(args.command)
