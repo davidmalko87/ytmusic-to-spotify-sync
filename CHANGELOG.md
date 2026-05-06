@@ -10,11 +10,13 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ### Fixed
 - **Sync no longer retries persistently-unmatchable tracks every run.** The matcher had no "I already tried this and it failed" flag, so the same ~9 niche tracks (regional uploads, weird formatting, fan edits) were re-searched on every sync forever. Each retry burned ~3 s of Spotify API time × N tracks, with zero gain.
+- **Recreated-Spotify-playlist scenario.** When you delete and recreate the Spotify playlist (new ID in `.env`), `sync` previously did nothing — it only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". The new `repush` command (option `[12]` in the menu) reads every URI from the enriched CSV and pushes them all to the current `SPOTIFY_PLAYLIST_ID` in batches of 100. No Spotify search calls.
 
 ### Added
 - **`Track.match_attempted`** flag — set to `True` after the matcher runs on a track, regardless of outcome. Survives in the enriched CSV.
 - **`sync --retry-unmatched`** flag — opt-in one-shot retry of all previously-failed tracks. Equivalent to running the standalone `retry-unmatched` command but folded into the regular sync.
 - New "previously-failed" line in the sync header showing how many tracks are being skipped because they already failed once.
+- **`repush` command** — push every already-matched URI from the enriched CSV to the current Spotify playlist. Supports `--dry-run`. Use after deleting and recreating a Spotify playlist.
 
 ### Changed
 - Default `sync` behaviour now skips tracks with `match_attempted=True AND no spotify_uri`. Use the existing `retry-unmatched` command (option `[7]` in menu) or the new `--retry-unmatched` flag to retry them when Spotify's catalogue grows or you've cleaned up the source metadata.

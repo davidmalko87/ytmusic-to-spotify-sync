@@ -81,7 +81,8 @@ MENU_OPTIONS = [
     ("9",  "Classify genre + mood from tags",       "classify"),
     ("10", "Sync Liked Songs (YTM <- -> Spotify)",  "sync-likes"),
     ("11", "Export enriched data to JSON",          "export"),
-    ("12", "Show status",                           "status"),
+    ("12", "Re-push to recreated Spotify playlist", "repush"),
+    ("13", "Show status",                           "status"),
     ("0",  "Exit",                                  "exit"),
 ]
 
@@ -123,7 +124,7 @@ def interactive_menu() -> None:
         dry_run = False
         if cmd in (
             "import-csv", "snapshot", "sync", "sync-csv",
-            "retry-unmatched", "lastfm", "classify", "export", "sync-likes",
+            "retry-unmatched", "lastfm", "classify", "export", "sync-likes", "repush",
         ):
             try:
                 dr = input("Dry run? (y/N): ").strip().lower()
@@ -864,6 +865,55 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"  {g:15s}  {n}")
 
 
+def cmd_repush(args: argparse.Namespace) -> None:
+    """Push every already-matched track to the current Spotify playlist.
+
+    Use this when you've recreated the Spotify playlist (new ID in .env)
+    and need to repopulate it from `playlist_enriched.csv`. The regular
+    `sync` command only pushes *newly-matched* tracks since the last
+    snapshot — it has no concept of "the destination playlist is empty
+    but my CSV has 3000 matches", so it does nothing.
+
+    `repush` reads every track with a `spotify_uri` from the enriched
+    CSV and adds them all to `SPOTIFY_PLAYLIST_ID` in batches of 100.
+    No Spotify search calls — uses the URIs already on disk.
+    """
+    setup_logging(args.verbose)
+    config = load_config()
+    require_spotify_config(config)
+    ensure_dirs()
+
+    if not ENRICHED_CSV.exists():
+        print("Error: no enriched CSV found. Run sync first to populate matches.")
+        sys.exit(1)
+
+    enriched = read_enriched_csv()
+    matched = [t for t in enriched if t.has_spotify_match]
+    print(f"Enriched CSV: {len(enriched)} total tracks, {len(matched)} have Spotify matches")
+
+    if not matched:
+        print("No matched tracks found. Nothing to push.")
+        return
+
+    uris = [t.spotify_uri for t in matched if t.spotify_uri]
+    print(f"Target playlist: {config['SPOTIFY_PLAYLIST_ID']}")
+    print(f"Tracks to push:  {len(uris)}")
+
+    if args.dry_run:
+        print("\n[DRY RUN] Would add these tracks. First 5:")
+        for t in matched[:5]:
+            print(f"  {t.title[:40]:40s} -- {t.artist[:30]:30s}  {t.spotify_uri}")
+        if len(matched) > 5:
+            print(f"  ... and {len(matched) - 5} more")
+        return
+
+    sp = get_spotify_client(config)
+    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris)
+    print(f"\nDone! Added {added}/{len(uris)} tracks to the Spotify playlist.")
+    if added < len(uris):
+        print(f"  ({len(uris) - added} failed — check the log for details.)")
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export the enriched CSV as portable JSON.
 
@@ -1141,6 +1191,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--output", "-o", help="Output JSON path (default: data/playlist_enriched.json)")
     p_export.add_argument("--dry-run", action="store_true", help="Preview without writing")
 
+    p_repush = sub.add_parser("repush", help="Re-push all matched URIs to the current Spotify playlist (use after recreating the playlist)")
+    p_repush.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
     p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
     p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
 
@@ -1162,6 +1215,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "classify": cmd_classify,
         "export": cmd_export,
         "sync-likes": cmd_sync_likes,
+        "repush": cmd_repush,
         "status": cmd_status,
     }
     handler = commands.get(args.command)
