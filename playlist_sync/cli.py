@@ -57,6 +57,7 @@ from playlist_sync.spotify_client import (
 )
 from playlist_sync.utils import setup_logging
 from playlist_sync.ytmusic_client import (
+    LikedSongsAuthError,
     fetch_liked_tracks,
     fetch_playlist_tracks,
     load_latest_likes_snapshot,
@@ -81,7 +82,8 @@ MENU_OPTIONS = [
     ("9",  "Classify genre + mood from tags",       "classify"),
     ("10", "Sync Liked Songs (YTM <- -> Spotify)",  "sync-likes"),
     ("11", "Export enriched data to JSON",          "export"),
-    ("12", "Show status",                           "status"),
+    ("12", "Re-push to recreated Spotify playlist", "repush"),
+    ("13", "Show status",                           "status"),
     ("0",  "Exit",                                  "exit"),
 ]
 
@@ -123,7 +125,7 @@ def interactive_menu() -> None:
         dry_run = False
         if cmd in (
             "import-csv", "snapshot", "sync", "sync-csv",
-            "retry-unmatched", "lastfm", "classify", "export", "sync-likes",
+            "retry-unmatched", "lastfm", "classify", "export", "sync-likes", "repush",
         ):
             try:
                 dr = input("Dry run? (y/N): ").strip().lower()
@@ -141,6 +143,8 @@ def interactive_menu() -> None:
             from_csv=None,
             force=False,
             output=None,
+            retry_unmatched=False,
+            replace=False,
         )
 
         if cmd == "sync-csv":
@@ -397,6 +401,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
     needs_matching: list[Track] = []
     already_matched: list[Track] = []
     skipped_tracks: list[Track] = []
+    previously_failed: list[Track] = []   # tracks where matcher already gave up
+
+    retry_unmatched_now = getattr(args, "retry_unmatched", False)
 
     for track in current:
         fp = track.fingerprint
@@ -404,6 +411,16 @@ def cmd_sync(args: argparse.Namespace) -> None:
             enriched = existing_map[fp]
             enriched.last_synced = track.last_synced or enriched.last_synced
             already_matched.append(enriched)
+        elif (
+            fp in existing_map
+            and existing_map[fp].match_attempted
+            and not retry_unmatched_now
+        ):
+            # We've tried matching this track at least once and it failed —
+            # don't waste Spotify search quota on it every sync. Use
+            # `retry-unmatched` (option 7) or `sync --retry-unmatched` to
+            # explicitly retry these.
+            previously_failed.append(existing_map[fp])
         else:
             needs_matching.append(track)
 
@@ -429,9 +446,12 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if skipped_tracks:
         print(f"Skipped {len(skipped_tracks)} track(s) with no album metadata "
               f"(YouTube uploads / fan edits) — written to skipped.csv")
+    if previously_failed:
+        print(f"Skipping {len(previously_failed)} previously-unmatched track(s) "
+              f"(use 'retry-unmatched' or 'sync --retry-unmatched' to retry).")
 
     print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}, "
-          f"skipped: {len(skipped_tracks)}")
+          f"skipped: {len(skipped_tracks)}, previously-failed: {len(previously_failed)}")
 
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
@@ -519,6 +539,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 for track in tqdm(to_search, desc="Matching", unit="track"):
                     result = match_track(sp, track)
                     fp = track.fingerprint
+                    # Mark attempted regardless of outcome — failures go in
+                    # unmatched.csv and won't be re-tried automatically next
+                    # sync (use retry-unmatched to explicitly retry them).
+                    track.match_attempted = True
                     if result.matched:
                         enriched_track = apply_match_to_track(track, result)
                         already_matched.append(enriched_track)
@@ -609,16 +633,24 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
-        all_tracks = already_matched + unmatched_tracks + skipped_tracks
+        # previously_failed tracks must be included in the CSV write so
+        # their match_attempted=True flag survives the round-trip; otherwise
+        # next sync would treat them as fresh again.
+        all_tracks = already_matched + unmatched_tracks + skipped_tracks + previously_failed
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
         write_enriched_csv(all_tracks)
         print(f"Enriched CSV updated: {ENRICHED_CSV}")
 
-        if unmatched_tracks:
-            write_unmatched_csv(unmatched_tracks)
-            print(f"Unmatched tracks saved: {UNMATCHED_CSV}")
+        # unmatched.csv reflects every track currently without a Spotify
+        # match — both the freshly-failed batch and the long-tail of
+        # previously-failed tracks — so the user always sees the full
+        # backlog and can retry it with `retry-unmatched`.
+        all_unmatched = unmatched_tracks + previously_failed
+        if all_unmatched:
+            write_unmatched_csv(all_unmatched)
+            print(f"Unmatched tracks saved: {UNMATCHED_CSV} ({len(all_unmatched)} total)")
 
         if skipped_tracks:
             write_skipped_csv(skipped_tracks)
@@ -633,7 +665,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             current=current,
             already_matched=already_matched,
             matched_results=matched_results,
-            unmatched=unmatched_tracks,
+            unmatched=all_unmatched,
             skipped=skipped_tracks,
             diff=diff,
         )
@@ -683,6 +715,8 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
 
     for track in tqdm(tracks, desc="Retrying", unit="track"):
         result = match_track(sp, track)
+        # Refresh the attempted flag — we just retried.
+        track.match_attempted = True
         if result.matched:
             enriched = apply_match_to_track(track, result)
             newly_matched.append(enriched)
@@ -833,6 +867,97 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"  {g:15s}  {n}")
 
 
+def cmd_repush(args: argparse.Namespace) -> None:
+    """Push every already-matched track to the current Spotify playlist.
+
+    Use this when you've recreated the Spotify playlist (new ID in .env)
+    and need to repopulate it from `playlist_enriched.csv`. The regular
+    `sync` command only pushes *newly-matched* tracks since the last
+    snapshot — it has no concept of "the destination playlist is empty
+    but my CSV has 3000 matches", so it does nothing.
+
+    Idempotent by default: fetches the current playlist contents first
+    and only adds URIs that are missing. Running `repush` twice in a row
+    is safe — the second run is a no-op. Pass `--replace` to wipe the
+    playlist completely first (useful when the playlist has accumulated
+    duplicates from older non-idempotent versions).
+    """
+    setup_logging(args.verbose)
+    config = load_config()
+    require_spotify_config(config)
+    ensure_dirs()
+
+    if not ENRICHED_CSV.exists():
+        print("Error: no enriched CSV found. Run sync first to populate matches.")
+        sys.exit(1)
+
+    enriched = read_enriched_csv()
+    matched = [t for t in enriched if t.has_spotify_match]
+    print(f"Enriched CSV: {len(enriched)} total tracks, {len(matched)} have Spotify matches")
+
+    if not matched:
+        print("No matched tracks found. Nothing to push.")
+        return
+
+    desired_uris = [t.spotify_uri for t in matched if t.spotify_uri]
+    print(f"Target playlist: {config['SPOTIFY_PLAYLIST_ID']}")
+
+    sp = get_spotify_client(config)
+
+    # Fetch what's currently in the playlist so we can be idempotent.
+    print("Reading current playlist contents...")
+    from playlist_sync.spotify_client import get_playlist_tracks
+    current_tracks = get_playlist_tracks(sp, config["SPOTIFY_PLAYLIST_ID"])
+    current_uri_counts: dict[str, int] = {}
+    for t in current_tracks:
+        if t and t.get("uri"):
+            current_uri_counts[t["uri"]] = current_uri_counts.get(t["uri"], 0) + 1
+    print(f"Currently in playlist: {len(current_tracks)} entries ({len(current_uri_counts)} unique URIs)")
+
+    replace_mode = getattr(args, "replace", False)
+
+    # If --replace OR there are duplicates from a previous non-idempotent run,
+    # offer to clear the playlist first.
+    has_dupes = any(c > 1 for c in current_uri_counts.values())
+    if replace_mode or has_dupes:
+        if has_dupes and not replace_mode:
+            print(
+                f"Detected duplicates in the playlist ({len(current_tracks) - len(current_uri_counts)} extras). "
+                "Pass --replace to wipe the playlist first; otherwise idempotent add will leave duplicates as-is."
+            )
+        if replace_mode and current_tracks:
+            print(f"--replace: removing all {len(current_uri_counts)} unique URIs from the playlist...")
+            if args.dry_run:
+                print(f"[DRY RUN] Would remove {len(current_uri_counts)} URIs and add {len(desired_uris)}")
+                return
+            remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], list(current_uri_counts.keys()))
+            current_uri_counts = {}
+
+    # Idempotent add: only push URIs that aren't already in the playlist
+    desired_set = set(desired_uris)
+    already_present = desired_set & set(current_uri_counts.keys())
+    to_add = [u for u in desired_uris if u not in current_uri_counts]
+    print(f"Already in playlist: {len(already_present)} URIs")
+    print(f"To add:              {len(to_add)} URIs")
+
+    if not to_add:
+        print("\nPlaylist already contains every matched track. Nothing to do.")
+        return
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would add {len(to_add)} tracks. First 5:")
+        for uri in to_add[:5]:
+            t = next((t for t in matched if t.spotify_uri == uri), None)
+            if t:
+                print(f"  {t.title[:40]:40s} -- {t.artist[:30]:30s}  {uri}")
+        return
+
+    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], to_add)
+    print(f"\nDone! Added {added}/{len(to_add)} tracks to the Spotify playlist.")
+    if added < len(to_add):
+        print(f"  ({len(to_add) - added} failed — check the log for details.)")
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export the enriched CSV as portable JSON.
 
@@ -891,7 +1016,12 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
 
     # Step 1: fetch current YTM likes
     print("Fetching YT Music liked songs...")
-    current = fetch_liked_tracks(config["YTMUSIC_AUTH_FILE"])
+    try:
+        current = fetch_liked_tracks(config["YTMUSIC_AUTH_FILE"])
+    except LikedSongsAuthError as e:
+        # Clear, actionable error instead of dumping a wall of JSON
+        print(f"\n{e}\n")
+        sys.exit(1)
     print(f"Fetched {len(current)} liked songs")
 
     # Step 2: load previous likes snapshot for diff
@@ -1091,6 +1221,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, metavar="N",
         help="Max new tracks to match per run (use to stay within Spotify's daily API quota)",
     )
+    p_sync.add_argument(
+        "--retry-unmatched", action="store_true",
+        help="Also retry tracks that previously failed matching (default: skip them)",
+    )
 
     p_retry = sub.add_parser("retry-unmatched", help="Re-attempt matching for unmatched tracks")
     p_retry.add_argument("--dry-run", action="store_true", help="Preview without pushing")
@@ -1105,6 +1239,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="Export the enriched CSV as portable JSON")
     p_export.add_argument("--output", "-o", help="Output JSON path (default: data/playlist_enriched.json)")
     p_export.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
+    p_repush = sub.add_parser("repush", help="Re-push all matched URIs to the current Spotify playlist (use after recreating the playlist)")
+    p_repush.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_repush.add_argument("--replace", action="store_true", help="Wipe the playlist completely before adding (use to clean up duplicates)")
 
     p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
     p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -1127,6 +1265,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "classify": cmd_classify,
         "export": cmd_export,
         "sync-likes": cmd_sync_likes,
+        "repush": cmd_repush,
         "status": cmd_status,
     }
     handler = commands.get(args.command)

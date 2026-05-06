@@ -3,7 +3,7 @@
 > Automatically sync your YouTube Music playlists to Spotify — with smart track matching, diff-based updates, and full metadata enrichment.
 
 [![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.7.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.7.1-blue)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
@@ -141,7 +141,8 @@ python playlist_sync.py
   [9]  Classify genre + mood from tags
   [10] Sync Liked Songs (YTM <-> Spotify)
   [11] Export enriched data to JSON
-  [12] Show status
+  [12] Re-push to recreated Spotify playlist
+  [13] Show status
   [0]  Exit
 ```
 
@@ -155,7 +156,8 @@ python playlist_sync.py sync                   # Full sync (YT Music API → Spo
 python playlist_sync.py sync --from-csv        # Sync from CSV export instead
 python playlist_sync.py sync --dry-run         # Preview without making changes
 python playlist_sync.py sync --limit 50        # Match at most 50 new tracks this run
-python playlist_sync.py retry-unmatched        # Retry previously failed matches
+python playlist_sync.py sync --retry-unmatched # Also retry tracks that previously failed
+python playlist_sync.py retry-unmatched        # Standalone retry of previously failed matches
 python playlist_sync.py lastfm                 # Re-run Last.fm enrichment on the existing CSV
 python playlist_sync.py classify               # Re-derive primary_genre and mood from tags
 python playlist_sync.py classify --force       # Re-classify even rows that already have values
@@ -163,6 +165,9 @@ python playlist_sync.py sync-likes             # Mirror YT Music liked songs to 
 python playlist_sync.py sync-likes --dry-run   # Preview likes-sync changes
 python playlist_sync.py export                 # Export enriched CSV as JSON (default: data/playlist_enriched.json)
 python playlist_sync.py export -o my_data.json # Custom output path
+python playlist_sync.py repush                 # Re-push all matched URIs (idempotent — only adds missing)
+python playlist_sync.py repush --replace       # Wipe the playlist first, then add (cleans duplicates)
+python playlist_sync.py repush --dry-run       # Preview without pushing
 python playlist_sync.py status                 # Show sync statistics
 ```
 
@@ -235,7 +240,7 @@ ytmusic-to-spotify-sync/
 
 ## Output: enriched CSV
 
-The sync produces `data/playlist_enriched.csv` with **49 columns**:
+The sync produces `data/playlist_enriched.csv` with **50 columns**:
 
 | Column | Source |
 |--------|--------|
@@ -258,6 +263,7 @@ The sync produces `data/playlist_enriched.csv` with **49 columns**:
 | `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm endpoints already attempted |
 | `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
 | `skip_reason` | Why the matcher pre-filtered this track (e.g. `no_album` for YT Music tracks lacking album metadata) — set means no Spotify search was attempted |
+| `match_attempted` | `true` once the matcher has run on this track. Tracks with `match_attempted=true AND no spotify_uri` are skipped on subsequent syncs unless `--retry-unmatched` is passed (or `retry-unmatched` is run standalone) |
 | **`primary_genre`** | Single broad genre bucket (`electronic`, `rock`, `soundtrack`, …) — derived locally from tags |
 | **`mood`** | Multi-label mood (`chill`, `epic`, `cinematic`, …) — derived locally from tags |
 | `match_method`, `match_confidence` | Matching diagnostics |
@@ -305,6 +311,18 @@ Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state nev
 - `data/likes_unmatched.csv` — likes that couldn't be matched
 
 **One-time re-authorization required** on first launch after upgrading to 0.7.0 — the new scope (`user-library-modify`) needs your consent. spotipy refreshes the cached token automatically.
+
+## Recreated the Spotify playlist? Use `repush`
+
+If you delete and recreate your Spotify playlist (new ID in `.env`), `sync` won't repopulate it — `sync` only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". Run:
+
+```bash
+python playlist_sync.py repush             # idempotent — only adds URIs missing from the playlist
+python playlist_sync.py repush --replace   # wipe the playlist first, then add (cleans dupes)
+python playlist_sync.py repush --dry-run   # preview the push
+```
+
+Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks.
 
 ## JSON export
 

@@ -6,6 +6,30 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.7.1] - 2026-05-07
+
+### Fixed
+- **Sync no longer retries persistently-unmatchable tracks every run.** The matcher had no "I already tried this and it failed" flag, so the same ~9 niche tracks (regional uploads, weird formatting, fan edits) were re-searched on every sync forever. Each retry burned ~3 s of Spotify API time × N tracks, with zero gain.
+- **Recreated-Spotify-playlist scenario.** When you delete and recreate the Spotify playlist (new ID in `.env`), `sync` previously did nothing — it only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". The new `repush` command (option `[12]` in the menu) reads every URI from the enriched CSV and pushes them all to the current `SPOTIFY_PLAYLIST_ID` in batches of 100. No Spotify search calls.
+
+### Added
+- **`Track.match_attempted`** flag — set to `True` after the matcher runs on a track, regardless of outcome. Survives in the enriched CSV.
+- **`sync --retry-unmatched`** flag — opt-in one-shot retry of all previously-failed tracks. Equivalent to running the standalone `retry-unmatched` command but folded into the regular sync.
+- New "previously-failed" line in the sync header showing how many tracks are being skipped because they already failed once.
+- **`repush` command** — push every already-matched URI from the enriched CSV to the current Spotify playlist. **Idempotent** by default: fetches the current playlist contents first and only adds URIs that aren't already there, so running it twice in a row is safe (the second run is a no-op). Pass `--replace` to wipe the playlist completely first (useful for cleaning up duplicates from earlier non-idempotent versions). Supports `--dry-run`.
+- **Friendly error for `sync-likes` auth failure** — when YT Music's Liked Music endpoint returns the unauthenticated "Sign in" page (which it sometimes does even when ordinary playlists work fine), the user now gets a clear step-by-step recovery procedure instead of a raw JSON dump from `ytmusicapi`. The fix is to refresh `browser.json` via option `[1]` after navigating to the Liked Songs page in YT Music so the captured cookies have the right scope.
+
+### Changed
+- Default `sync` behaviour now skips tracks with `match_attempted=True AND no spotify_uri`. Use the existing `retry-unmatched` command (option `[7]` in menu) or the new `--retry-unmatched` flag to retry them when Spotify's catalogue grows or you've cleaned up the source metadata.
+- `unmatched.csv` now reflects the **full** unmatched backlog every run (not just the freshly-failed batch), so the user always sees the complete list available for retry.
+- `cmd_retry_unmatched` refreshes `match_attempted` after each retry.
+- Enriched CSV grew to **50 columns** (was 49): added `match_attempted`.
+
+### Migration note
+Existing CSVs are auto-migrated: every track currently in `playlist_enriched.csv` is treated as already-attempted, so the next sync will skip the persistent failures immediately. New tracks added to the YT Music playlist after upgrade start with `match_attempted=False` and get processed normally.
+
+---
+
 ## [0.7.0] - 2026-05-07
 
 ### Added

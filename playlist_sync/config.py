@@ -41,7 +41,7 @@ ENRICHED_COLUMNS = [
     "artist_tags", "tag_source", "lastfm_attempted", "lastfm_track_attempted",
     "primary_genre", "mood",
     "spotify_metadata_attempted", "spotify_genres_attempted",
-    "skip_reason",
+    "skip_reason", "match_attempted",
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 

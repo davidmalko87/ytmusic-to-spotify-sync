@@ -258,13 +258,50 @@ def load_latest_snapshot() -> list[Track] | None:
 # subdirectory so the diff state for likes never collides with the diff
 # state for the user's main playlist.
 
+class LikedSongsAuthError(RuntimeError):
+    """YT Music returned an unauthenticated 'Sign in' page for the LM endpoint."""
+
+
 def fetch_liked_tracks(auth_file: str) -> list[Track]:
-    """Fetch all liked songs from YT Music (the implicit `LM` playlist)."""
+    """Fetch all liked songs from YT Music (the implicit `LM` playlist).
+
+    The Liked Music (`LM`) endpoint is gated more tightly than regular
+    playlists by YT Music — it requires cookies that aren't always
+    captured by `setup-ytmusic` even when the same browser session can
+    fetch ordinary playlists fine. When that happens, the API returns
+    an unauthenticated "Sign in" page (`singleColumnBrowseResultsRenderer`)
+    and ytmusicapi crashes trying to parse it as a playlist.
+
+    We catch that and raise a clear error with a recovery procedure so
+    the user knows exactly what to do.
+    """
     ytm = get_ytmusic_client(auth_file)
 
     logger.info("Fetching YT Music liked songs")
     # `get_liked_songs` returns the same shape as `get_playlist`
-    playlist = ytm.get_liked_songs(limit=10000)
+    try:
+        playlist = ytm.get_liked_songs(limit=10000)
+    except KeyError as e:
+        # ytmusicapi raises a bare KeyError for the missing renderer key
+        if "twoColumnBrowseResultsRenderer" in str(e):
+            raise LikedSongsAuthError(
+                "YT Music API returned an unauthenticated 'Sign in' page for "
+                "the Liked Songs (LM) endpoint, even though your browser auth "
+                "works for regular playlists.\n\n"
+                "How to fix:\n"
+                "  1. Open https://music.youtube.com in your browser (logged in)\n"
+                "  2. Click 'Library' -> 'Songs' (your liked tracks). Make sure\n"
+                "     they actually load on screen.\n"
+                "  3. Press F12 -> Network tab -> filter for /browse\n"
+                "  4. Reload the Liked Songs page; pick the most recent POST to\n"
+                "     /browse with status 200\n"
+                "  5. Copy the request headers and run option [1] (Setup YT Music\n"
+                "     auth) to refresh browser.json\n"
+                "  6. Re-run option [10] Sync Liked Songs\n\n"
+                "If it still fails, the LM endpoint may not be available for your\n"
+                "account region/type. Regular playlist sync still works."
+            ) from e
+        raise
 
     tracks: list[Track] = []
     for item in playlist.get("tracks", []):
