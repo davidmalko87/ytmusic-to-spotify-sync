@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ytmusicapi import YTMusic
 
-from playlist_sync.config import SNAPSHOTS_DIR, ensure_dirs
+from playlist_sync.config import LIKES_SNAPSHOTS_DIR, SNAPSHOTS_DIR, ensure_dirs
 from playlist_sync.models import Track
 
 logger = logging.getLogger("playlist_sync")
@@ -248,4 +248,120 @@ def load_latest_snapshot() -> list[Track] | None:
     ]
 
     logger.info("Loaded latest snapshot: %d tracks (from %s)", len(tracks), data.get("timestamp", "?"))
+    return tracks
+
+
+# ── Liked tracks (saved songs) ──────────────────────────────────────
+#
+# Mirrors the playlist functions but operates on YT Music's "liked songs"
+# (the implicit `LM` playlist) and writes to a separate snapshots/likes/
+# subdirectory so the diff state for likes never collides with the diff
+# state for the user's main playlist.
+
+def fetch_liked_tracks(auth_file: str) -> list[Track]:
+    """Fetch all liked songs from YT Music (the implicit `LM` playlist)."""
+    ytm = get_ytmusic_client(auth_file)
+
+    logger.info("Fetching YT Music liked songs")
+    # `get_liked_songs` returns the same shape as `get_playlist`
+    playlist = ytm.get_liked_songs(limit=10000)
+
+    tracks: list[Track] = []
+    for item in playlist.get("tracks", []):
+        if item is None:
+            continue
+
+        artists = item.get("artists")
+        if artists and isinstance(artists, list):
+            artist_str = ", ".join(a.get("name", "") for a in artists if a)
+        else:
+            artist_str = ""
+
+        album_info = item.get("album")
+        album_str = album_info.get("name", "") if album_info else ""
+
+        duration_sec = 0.0
+        if item.get("duration_seconds"):
+            try:
+                duration_sec = float(item["duration_seconds"])
+            except (ValueError, TypeError):
+                pass
+        elif item.get("duration"):
+            try:
+                parts = str(item["duration"]).split(":")
+                if len(parts) == 2:
+                    duration_sec = int(parts[0]) * 60 + int(parts[1])
+                elif len(parts) == 3:
+                    duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except (ValueError, IndexError):
+                pass
+
+        video_id = item.get("videoId", "")
+
+        tracks.append(Track(
+            title=item.get("title", ""),
+            artist=artist_str,
+            album=album_str,
+            isrc=item.get("isrc", ""),
+            platform="ytmusic",
+            track_id=video_id,
+            duration=duration_sec,
+            url=f"https://music.youtube.com/watch?v={video_id}" if video_id else "",
+        ))
+
+    logger.info("Fetched %d liked tracks from YT Music", len(tracks))
+    return tracks
+
+
+def save_likes_snapshot(tracks: list[Track]) -> Path:
+    """Save current liked-songs state for future diffing."""
+    ensure_dirs()
+
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    snapshot_path = LIKES_SNAPSHOTS_DIR / f"likes_{timestamp}.json"
+
+    data = {
+        "timestamp": datetime.now().isoformat(),
+        "track_count": len(tracks),
+        "tracks": [
+            {
+                "trackId": t.track_id,
+                "title": t.title,
+                "artist": t.artist,
+                "album": t.album,
+                "duration": t.duration,
+            }
+            for t in tracks
+        ],
+    }
+
+    snapshot_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    latest_path = LIKES_SNAPSHOTS_DIR / "latest.json"
+    latest_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    logger.info("Likes snapshot saved: %s (%d tracks)", snapshot_path.name, len(tracks))
+    return snapshot_path
+
+
+def load_latest_likes_snapshot() -> list[Track] | None:
+    """Load the most recent likes snapshot, or None if no snapshots exist."""
+    latest_path = LIKES_SNAPSHOTS_DIR / "latest.json"
+    if not latest_path.exists():
+        return None
+
+    data = json.loads(latest_path.read_text(encoding="utf-8"))
+    tracks = [
+        Track(
+            title=t["title"],
+            artist=t["artist"],
+            album=t.get("album", ""),
+            track_id=t.get("trackId", ""),
+            duration=t.get("duration", 0.0),
+            platform="ytmusic",
+        )
+        for t in data["tracks"]
+    ]
+
+    logger.info("Loaded latest likes snapshot: %d tracks", len(tracks))
     return tracks

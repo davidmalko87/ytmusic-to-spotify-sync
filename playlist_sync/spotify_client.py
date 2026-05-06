@@ -25,8 +25,18 @@ logger = logging.getLogger("playlist_sync")
 
 
 def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
-    """Create an authenticated Spotify client."""
-    scope = "playlist-modify-public playlist-modify-private playlist-read-private"
+    """Create an authenticated Spotify client.
+
+    Note: scope now includes `user-library-read` and `user-library-modify`
+    so the likes-sync command can read and update the user's saved-tracks
+    library. Adding these scopes triggers a one-time re-authorization in
+    the browser on first launch after upgrade — spotipy refreshes the
+    cached token automatically.
+    """
+    scope = (
+        "playlist-modify-public playlist-modify-private playlist-read-private "
+        "user-library-read user-library-modify"
+    )
     auth_manager = SpotifyOAuth(
         client_id=config["SPOTIPY_CLIENT_ID"],
         client_secret=config["SPOTIPY_CLIENT_SECRET"],
@@ -314,4 +324,98 @@ def remove_tracks_from_playlist(
             logger.error("Failed to remove batch at offset %d: %s", i, e)
 
     logger.info("Removed %d/%d tracks from Spotify playlist", removed, len(uris))
+    return removed
+
+
+# ── Saved tracks (user library / "Liked Songs") ─────────────────────
+#
+# Endpoint limit: GET/PUT/DELETE /me/tracks accept up to 50 IDs per call.
+
+SPOTIFY_SAVED_TRACKS_BATCH = 50
+
+
+def get_saved_tracks(sp: spotipy.Spotify) -> list[dict]:
+    """Fetch all tracks from the user's Liked Songs (saved tracks).
+
+    Returns a list of full track dicts (the same shape as playlist items).
+    """
+    tracks: list[dict] = []
+    offset = 0
+    while True:
+        results = sp.current_user_saved_tracks(limit=50, offset=offset)
+        items = results.get("items", [])
+        if not items:
+            break
+        for item in items:
+            t = item.get("track")
+            if t:
+                tracks.append(t)
+        if len(items) < 50:
+            break
+        offset += 50
+
+    logger.info("Fetched %d saved tracks from Spotify library", len(tracks))
+    return tracks
+
+
+def add_saved_tracks(
+    sp: spotipy.Spotify,
+    track_ids: list[str],
+    dry_run: bool = False,
+) -> int:
+    """Add tracks to the user's Liked Songs in batches of 50."""
+    if not track_ids:
+        return 0
+
+    if dry_run:
+        logger.info("[DRY RUN] Would save %d tracks to library", len(track_ids))
+        return len(track_ids)
+
+    added = 0
+    for i in range(0, len(track_ids), SPOTIFY_SAVED_TRACKS_BATCH):
+        batch = track_ids[i:i + SPOTIFY_SAVED_TRACKS_BATCH]
+        try:
+            sp.current_user_saved_tracks_add(batch)
+            added += len(batch)
+            logger.debug("Saved batch of %d tracks (%d/%d)", len(batch), added, len(track_ids))
+        except spotipy.SpotifyException as e:
+            if e.http_status == 429:
+                _handle_rate_limit(e)
+                # retry this batch once
+                try:
+                    sp.current_user_saved_tracks_add(batch)
+                    added += len(batch)
+                    continue
+                except spotipy.SpotifyException as e2:
+                    logger.error("Retry failed for batch at offset %d: %s", i, e2)
+            else:
+                logger.error("Failed to save batch at offset %d: %s", i, e)
+
+    logger.info("Added %d/%d tracks to Spotify library", added, len(track_ids))
+    return added
+
+
+def remove_saved_tracks(
+    sp: spotipy.Spotify,
+    track_ids: list[str],
+    dry_run: bool = False,
+) -> int:
+    """Remove tracks from the user's Liked Songs in batches of 50."""
+    if not track_ids:
+        return 0
+
+    if dry_run:
+        logger.info("[DRY RUN] Would unsave %d tracks from library", len(track_ids))
+        return len(track_ids)
+
+    removed = 0
+    for i in range(0, len(track_ids), SPOTIFY_SAVED_TRACKS_BATCH):
+        batch = track_ids[i:i + SPOTIFY_SAVED_TRACKS_BATCH]
+        try:
+            sp.current_user_saved_tracks_delete(batch)
+            removed += len(batch)
+        except spotipy.SpotifyException as e:
+            logger.error("Failed to unsave batch at offset %d: %s", i, e)
+
+    logger.info("Removed %d/%d tracks from Spotify library", removed, len(track_ids))
     return removed

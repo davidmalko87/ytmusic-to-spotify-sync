@@ -70,6 +70,11 @@ class Track:
     spotify_metadata_attempted: bool = False  # /v1/tracks endpoint
     spotify_genres_attempted: bool = False    # /v1/artists endpoint
 
+    # Match-time skip reason. Currently set to "no_album" for YT Music tracks
+    # missing album metadata (typically YouTube uploads, fan edits, mixes).
+    # Tracks with skip_reason set are not sent to the Spotify search API.
+    skip_reason: str = ""
+
     # Matching metadata
     match_method: str = ""
     match_confidence: float = 0.0
@@ -134,6 +139,7 @@ class Track:
             "mood": self.mood,
             "spotify_metadata_attempted": "true" if self.spotify_metadata_attempted else "",
             "spotify_genres_attempted": "true" if self.spotify_genres_attempted else "",
+            "skip_reason": self.skip_reason,
             "match_method": self.match_method,
             "match_confidence": f"{self.match_confidence:.2f}" if self.match_confidence else "",
             "first_synced": self.first_synced,
@@ -187,6 +193,7 @@ class Track:
             mood=row.get("mood", ""),
             spotify_metadata_attempted=row.get("spotify_metadata_attempted", "").lower() == "true",
             spotify_genres_attempted=row.get("spotify_genres_attempted", "").lower() == "true",
+            skip_reason=row.get("skip_reason", ""),
             match_method=row.get("match_method", ""),
             match_confidence=float(row["match_confidence"]) if row.get("match_confidence") else 0.0,
             first_synced=row.get("first_synced", ""),
