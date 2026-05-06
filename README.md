@@ -165,7 +165,8 @@ python playlist_sync.py sync-likes             # Mirror YT Music liked songs to 
 python playlist_sync.py sync-likes --dry-run   # Preview likes-sync changes
 python playlist_sync.py export                 # Export enriched CSV as JSON (default: data/playlist_enriched.json)
 python playlist_sync.py export -o my_data.json # Custom output path
-python playlist_sync.py repush                 # Re-push all matched URIs to the current Spotify playlist
+python playlist_sync.py repush                 # Re-push all matched URIs (idempotent — only adds missing)
+python playlist_sync.py repush --replace       # Wipe the playlist first, then add (cleans duplicates)
 python playlist_sync.py repush --dry-run       # Preview without pushing
 python playlist_sync.py status                 # Show sync statistics
 ```
@@ -316,11 +317,12 @@ Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state nev
 If you delete and recreate your Spotify playlist (new ID in `.env`), `sync` won't repopulate it — `sync` only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". Run:
 
 ```bash
-python playlist_sync.py repush             # push every matched URI to the current SPOTIFY_PLAYLIST_ID
+python playlist_sync.py repush             # idempotent — only adds URIs missing from the playlist
+python playlist_sync.py repush --replace   # wipe the playlist first, then add (cleans dupes)
 python playlist_sync.py repush --dry-run   # preview the push
 ```
 
-Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds them all in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast.
+Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks.
 
 ## JSON export
 

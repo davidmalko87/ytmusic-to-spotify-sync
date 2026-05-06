@@ -57,6 +57,7 @@ from playlist_sync.spotify_client import (
 )
 from playlist_sync.utils import setup_logging
 from playlist_sync.ytmusic_client import (
+    LikedSongsAuthError,
     fetch_liked_tracks,
     fetch_playlist_tracks,
     load_latest_likes_snapshot,
@@ -143,6 +144,7 @@ def interactive_menu() -> None:
             force=False,
             output=None,
             retry_unmatched=False,
+            replace=False,
         )
 
         if cmd == "sync-csv":
@@ -874,9 +876,11 @@ def cmd_repush(args: argparse.Namespace) -> None:
     snapshot — it has no concept of "the destination playlist is empty
     but my CSV has 3000 matches", so it does nothing.
 
-    `repush` reads every track with a `spotify_uri` from the enriched
-    CSV and adds them all to `SPOTIFY_PLAYLIST_ID` in batches of 100.
-    No Spotify search calls — uses the URIs already on disk.
+    Idempotent by default: fetches the current playlist contents first
+    and only adds URIs that are missing. Running `repush` twice in a row
+    is safe — the second run is a no-op. Pass `--replace` to wipe the
+    playlist completely first (useful when the playlist has accumulated
+    duplicates from older non-idempotent versions).
     """
     setup_logging(args.verbose)
     config = load_config()
@@ -895,23 +899,63 @@ def cmd_repush(args: argparse.Namespace) -> None:
         print("No matched tracks found. Nothing to push.")
         return
 
-    uris = [t.spotify_uri for t in matched if t.spotify_uri]
+    desired_uris = [t.spotify_uri for t in matched if t.spotify_uri]
     print(f"Target playlist: {config['SPOTIFY_PLAYLIST_ID']}")
-    print(f"Tracks to push:  {len(uris)}")
-
-    if args.dry_run:
-        print("\n[DRY RUN] Would add these tracks. First 5:")
-        for t in matched[:5]:
-            print(f"  {t.title[:40]:40s} -- {t.artist[:30]:30s}  {t.spotify_uri}")
-        if len(matched) > 5:
-            print(f"  ... and {len(matched) - 5} more")
-        return
 
     sp = get_spotify_client(config)
-    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris)
-    print(f"\nDone! Added {added}/{len(uris)} tracks to the Spotify playlist.")
-    if added < len(uris):
-        print(f"  ({len(uris) - added} failed — check the log for details.)")
+
+    # Fetch what's currently in the playlist so we can be idempotent.
+    print("Reading current playlist contents...")
+    from playlist_sync.spotify_client import get_playlist_tracks
+    current_tracks = get_playlist_tracks(sp, config["SPOTIFY_PLAYLIST_ID"])
+    current_uri_counts: dict[str, int] = {}
+    for t in current_tracks:
+        if t and t.get("uri"):
+            current_uri_counts[t["uri"]] = current_uri_counts.get(t["uri"], 0) + 1
+    print(f"Currently in playlist: {len(current_tracks)} entries ({len(current_uri_counts)} unique URIs)")
+
+    replace_mode = getattr(args, "replace", False)
+
+    # If --replace OR there are duplicates from a previous non-idempotent run,
+    # offer to clear the playlist first.
+    has_dupes = any(c > 1 for c in current_uri_counts.values())
+    if replace_mode or has_dupes:
+        if has_dupes and not replace_mode:
+            print(
+                f"Detected duplicates in the playlist ({len(current_tracks) - len(current_uri_counts)} extras). "
+                "Pass --replace to wipe the playlist first; otherwise idempotent add will leave duplicates as-is."
+            )
+        if replace_mode and current_tracks:
+            print(f"--replace: removing all {len(current_uri_counts)} unique URIs from the playlist...")
+            if args.dry_run:
+                print(f"[DRY RUN] Would remove {len(current_uri_counts)} URIs and add {len(desired_uris)}")
+                return
+            remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], list(current_uri_counts.keys()))
+            current_uri_counts = {}
+
+    # Idempotent add: only push URIs that aren't already in the playlist
+    desired_set = set(desired_uris)
+    already_present = desired_set & set(current_uri_counts.keys())
+    to_add = [u for u in desired_uris if u not in current_uri_counts]
+    print(f"Already in playlist: {len(already_present)} URIs")
+    print(f"To add:              {len(to_add)} URIs")
+
+    if not to_add:
+        print("\nPlaylist already contains every matched track. Nothing to do.")
+        return
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would add {len(to_add)} tracks. First 5:")
+        for uri in to_add[:5]:
+            t = next((t for t in matched if t.spotify_uri == uri), None)
+            if t:
+                print(f"  {t.title[:40]:40s} -- {t.artist[:30]:30s}  {uri}")
+        return
+
+    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], to_add)
+    print(f"\nDone! Added {added}/{len(to_add)} tracks to the Spotify playlist.")
+    if added < len(to_add):
+        print(f"  ({len(to_add) - added} failed — check the log for details.)")
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -972,7 +1016,12 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
 
     # Step 1: fetch current YTM likes
     print("Fetching YT Music liked songs...")
-    current = fetch_liked_tracks(config["YTMUSIC_AUTH_FILE"])
+    try:
+        current = fetch_liked_tracks(config["YTMUSIC_AUTH_FILE"])
+    except LikedSongsAuthError as e:
+        # Clear, actionable error instead of dumping a wall of JSON
+        print(f"\n{e}\n")
+        sys.exit(1)
     print(f"Fetched {len(current)} liked songs")
 
     # Step 2: load previous likes snapshot for diff
@@ -1193,6 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_repush = sub.add_parser("repush", help="Re-push all matched URIs to the current Spotify playlist (use after recreating the playlist)")
     p_repush.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_repush.add_argument("--replace", action="store_true", help="Wipe the playlist completely before adding (use to clean up duplicates)")
 
     p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
     p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
