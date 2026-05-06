@@ -141,6 +141,7 @@ def interactive_menu() -> None:
             from_csv=None,
             force=False,
             output=None,
+            retry_unmatched=False,
         )
 
         if cmd == "sync-csv":
@@ -397,6 +398,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
     needs_matching: list[Track] = []
     already_matched: list[Track] = []
     skipped_tracks: list[Track] = []
+    previously_failed: list[Track] = []   # tracks where matcher already gave up
+
+    retry_unmatched_now = getattr(args, "retry_unmatched", False)
 
     for track in current:
         fp = track.fingerprint
@@ -404,6 +408,16 @@ def cmd_sync(args: argparse.Namespace) -> None:
             enriched = existing_map[fp]
             enriched.last_synced = track.last_synced or enriched.last_synced
             already_matched.append(enriched)
+        elif (
+            fp in existing_map
+            and existing_map[fp].match_attempted
+            and not retry_unmatched_now
+        ):
+            # We've tried matching this track at least once and it failed —
+            # don't waste Spotify search quota on it every sync. Use
+            # `retry-unmatched` (option 7) or `sync --retry-unmatched` to
+            # explicitly retry these.
+            previously_failed.append(existing_map[fp])
         else:
             needs_matching.append(track)
 
@@ -429,9 +443,12 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if skipped_tracks:
         print(f"Skipped {len(skipped_tracks)} track(s) with no album metadata "
               f"(YouTube uploads / fan edits) — written to skipped.csv")
+    if previously_failed:
+        print(f"Skipping {len(previously_failed)} previously-unmatched track(s) "
+              f"(use 'retry-unmatched' or 'sync --retry-unmatched' to retry).")
 
     print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}, "
-          f"skipped: {len(skipped_tracks)}")
+          f"skipped: {len(skipped_tracks)}, previously-failed: {len(previously_failed)}")
 
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
@@ -519,6 +536,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 for track in tqdm(to_search, desc="Matching", unit="track"):
                     result = match_track(sp, track)
                     fp = track.fingerprint
+                    # Mark attempted regardless of outcome — failures go in
+                    # unmatched.csv and won't be re-tried automatically next
+                    # sync (use retry-unmatched to explicitly retry them).
+                    track.match_attempted = True
                     if result.matched:
                         enriched_track = apply_match_to_track(track, result)
                         already_matched.append(enriched_track)
@@ -609,16 +630,24 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
-        all_tracks = already_matched + unmatched_tracks + skipped_tracks
+        # previously_failed tracks must be included in the CSV write so
+        # their match_attempted=True flag survives the round-trip; otherwise
+        # next sync would treat them as fresh again.
+        all_tracks = already_matched + unmatched_tracks + skipped_tracks + previously_failed
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
         write_enriched_csv(all_tracks)
         print(f"Enriched CSV updated: {ENRICHED_CSV}")
 
-        if unmatched_tracks:
-            write_unmatched_csv(unmatched_tracks)
-            print(f"Unmatched tracks saved: {UNMATCHED_CSV}")
+        # unmatched.csv reflects every track currently without a Spotify
+        # match — both the freshly-failed batch and the long-tail of
+        # previously-failed tracks — so the user always sees the full
+        # backlog and can retry it with `retry-unmatched`.
+        all_unmatched = unmatched_tracks + previously_failed
+        if all_unmatched:
+            write_unmatched_csv(all_unmatched)
+            print(f"Unmatched tracks saved: {UNMATCHED_CSV} ({len(all_unmatched)} total)")
 
         if skipped_tracks:
             write_skipped_csv(skipped_tracks)
@@ -633,7 +662,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             current=current,
             already_matched=already_matched,
             matched_results=matched_results,
-            unmatched=unmatched_tracks,
+            unmatched=all_unmatched,
             skipped=skipped_tracks,
             diff=diff,
         )
@@ -683,6 +712,8 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
 
     for track in tqdm(tracks, desc="Retrying", unit="track"):
         result = match_track(sp, track)
+        # Refresh the attempted flag — we just retried.
+        track.match_attempted = True
         if result.matched:
             enriched = apply_match_to_track(track, result)
             newly_matched.append(enriched)
@@ -1090,6 +1121,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument(
         "--limit", type=int, default=None, metavar="N",
         help="Max new tracks to match per run (use to stay within Spotify's daily API quota)",
+    )
+    p_sync.add_argument(
+        "--retry-unmatched", action="store_true",
+        help="Also retry tracks that previously failed matching (default: skip them)",
     )
 
     p_retry = sub.add_parser("retry-unmatched", help="Re-attempt matching for unmatched tracks")
