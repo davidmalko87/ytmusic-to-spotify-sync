@@ -44,6 +44,8 @@ from playlist_sync.enricher import (
     backfill_track_metadata,
     classify_all_tracks,
     enrich_with_audio_features,
+    lastfm_artist_tag_candidates,
+    lastfm_track_candidates,
 )
 from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
@@ -772,14 +774,8 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
         tracks = snapshot_tracks
         print(f"Loaded {len(tracks)} tracks from latest snapshot")
 
-    needs_track_data = [
-        t for t in tracks
-        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
-    ]
-    needs_artist_tags = [
-        t for t in tracks
-        if not t.artist_tags and t.artist and not t.lastfm_attempted
-    ]
+    needs_track_data = lastfm_track_candidates(tracks)
+    needs_artist_tags = lastfm_artist_tag_candidates(tracks)
     print(f"Need Last.fm track data: {len(needs_track_data)}")
     print(f"Need Last.fm artist tags: {len(needs_artist_tags)}")
 

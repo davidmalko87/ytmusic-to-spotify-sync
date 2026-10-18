@@ -6,6 +6,30 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.7.2] - 2026-10-18
+
+### Fixed
+- **Artists with `+` in the name now get Last.fm data.** Last.fm URL-decodes query values twice, so a correctly encoded `+` (`%2B`) arrived as a space: `Sultan + Shepard` was looked up as `Sultan   Shepard`, a ghost entry with no tags (372 listeners instead of 217,571). The client now encodes `+` once more (`%252B`) in every artist and track name. This affected every name containing `+`, e.g. `Florence + The Machine`.
+- **Post-punk and hardcore no longer land in `punk`.** `post-punk` (and `post-punk revival`) moved to the `rock` bucket, and a tag that is itself a bucket keyword now counts only for that bucket, so `post-punk` can't match `punk` through its words (SadSvit, Кино). Bare `hardcore` was dropped from `punk`; `hardcore punk` and `post-hardcore` stay, and `happy hardcore`, `hardstyle`, `gabber`, `speedcore` are `electronic`. A `punk` tag that ranks below a tag of an unrelated genre no longer decides the genre (Thylacine: `electronic, french, punk, ...` is `electronic`). On a real 3,600-track library, `punk` went from 91 tracks to 26.
+- **YouTube channel uploads no longer borrow a namesake's tags.** For YT Music tracks without an album (`skip_reason=no_album`, or no album at all), the "artist" is usually the uploading channel, and `artist.getInfo` returned whoever else has that name (`Arrakis` came back as metal, `Electronic Arts` as jazz). These tracks are no longer sent to `artist.getInfo`, and their stored artist tags are ignored when classifying, unless the same artist also has album tracks in the library or the title names them (`Guru Josh - Infinity 2012`).
+- **Failed Last.fm requests are retried instead of written off.** Network errors, HTTP failures, rate limits and other API errors used to set `lastfm_track_attempted` / `lastfm_attempted` as if Last.fm had said "not found", so those tracks were never retried. Only a real "not found" answer (Last.fm error 6) sets the flag now. A batch that stops early after 50 consecutive failures no longer marks the tracks it never queried.
+- **Duplicate tracks all get their play counts.** When the same artist + title appeared more than once in a playlist, only one copy received the Last.fm data and the others were marked attempted with nothing. On a real 3,600-track library that left 345 rows without counts. One lookup now fills every copy, and duplicate pairs are queried once.
+- Existing non-zero `lastfm_playcount` / `lastfm_listeners` and non-empty `lastfm_tags` are never overwritten with `0` or empty values.
+
+### Changed
+- **New mood label `acoustic`** (a character marker like `instrumental`) for tracks tagged `acoustic`, `unplugged`, `indie folk`, `chamber folk` or the whole tag `folk` (not `folk metal` / `folk punk`). Calm folk acts whose top tags carry no mood word (Daughter, Agnes Obel, Pomme, Of Monsters and Men, Low Roar) now get one. Also new: `dream pop` → `dreamy`; `peaceful`, `gentle`, `laid back`, `lullaby` → `chill`; `sadcore` → `sad`. On the real library, filled `mood` went from 702 to 1,037 tracks.
+- `lastfm` command counts now match what is actually fetched (channel uploads are left out of the artist-tag count).
+
+### Added
+- Offline `pytest` suite in `tests/` (`pyproject.toml` sets `pythonpath = ["."]`): Last.fm encoding and error handling, backfill retry and duplicate fan-out, genre/mood classification on real-looking tag pools.
+
+### Migration note
+Rows enriched by earlier versions keep their old skip-flags and classifications. To apply the fixes to an existing `playlist_enriched.csv`:
+- **Genre / mood only:** run `classify --force` (no API calls). This re-buckets punk/post-punk and drops namesake-based genres for channel uploads.
+- **Missing Last.fm data** (`+` artists, failed requests, duplicate rows): these rows are already flagged as attempted. If the CSV holds nothing but Last.fm enrichment (no Spotify matches yet), move it aside and re-run `lastfm`; it rebuilds from the latest snapshot.
+
+---
+
 ## [0.7.1] - 2026-05-07
 
 ### Fixed
