@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.7.3] - 2026-10-19
+
+### Added
+- **`lastfm --retry-missing`** re-checks rows that older versions marked as attempted but that still have no Last.fm data (no `lastfm_playcount`, or no `artist_tags`). Before 0.7.2, failed requests, `+` artists and duplicate rows all got the skip-flag, so plain runs never retried them. This one-off flag applies the 0.7.2 fixes to an existing `playlist_enriched.csv` without rebuilding it, so its Spotify enrichment is kept. Rows that already have data are not touched. The channel-upload rule still applies: no artist-tag lookups for YouTube uploads named after the channel. On a real 3,600-track library, `lastfm --retry-missing --dry-run` found 404 tracks for track data and 135 tracks (92 unique artists) for artist tags.
+- A retried row's skip-flag reflects only this run's answer: found or "not found" sets it, and a failed request clears it, so the next plain `lastfm` run retries that row.
+- Plain `lastfm` runs print how many flagged rows still lack data and point to `--retry-missing`.
+
+---
+
 ## [0.7.2] - 2026-10-18
 
 ### Fixed

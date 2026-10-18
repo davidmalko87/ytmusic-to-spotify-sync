@@ -501,30 +501,48 @@ def enrich_with_audio_features(
     return tracks
 
 
-def lastfm_track_candidates(tracks: list[Track]) -> list[Track]:
-    """Tracks that still need track.getInfo data (playcount, listeners, track tags)."""
+def lastfm_track_candidates(
+    tracks: list[Track], ignore_attempted: bool = False,
+) -> list[Track]:
+    """Tracks that still need track.getInfo data (playcount, listeners, track tags).
+
+    ignore_attempted=True also returns tracks flagged lastfm_track_attempted
+    that still have no playcount (`lastfm --retry-missing`): versions before
+    0.7.2 set that flag on failed requests and on duplicate rows.
+    """
     # Skip tracks Last.fm already answered for, even with "not found".
     # Without this, the ~5% of tracks that genuinely don't exist on Last.fm
     # get re-queried on every sync run forever.
     return [
         t for t in tracks
-        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
+        if not t.lastfm_playcount and t.title and t.artist
+        and (ignore_attempted or not t.lastfm_track_attempted)
     ]
 
 
-def _wants_artist_tags(track: Track) -> bool:
+def _wants_artist_tags(track: Track, ignore_attempted: bool = False) -> bool:
     """True if artist.getInfo has not been answered for this track yet."""
-    return not track.artist_tags and bool(track.artist) and not track.lastfm_attempted
+    return (
+        not track.artist_tags and bool(track.artist)
+        and (ignore_attempted or not track.lastfm_attempted)
+    )
 
 
-def lastfm_artist_tag_candidates(tracks: list[Track]) -> list[Track]:
+def lastfm_artist_tag_candidates(
+    tracks: list[Track], ignore_attempted: bool = False,
+) -> list[Track]:
     """Tracks that still need artist.getInfo tags.
 
     Channel uploads whose artist is just the channel name are left out
     (see _artist_is_trusted): their lookup would return a namesake's tags.
+    ignore_attempted=True also returns tracks flagged lastfm_attempted that
+    still have no artist tags; the channel-upload rule applies either way.
     """
     album_artists = _album_artists(tracks)
-    return [t for t in tracks if _wants_artist_tags(t) and _artist_is_trusted(t, album_artists)]
+    return [
+        t for t in tracks
+        if _wants_artist_tags(t, ignore_attempted) and _artist_is_trusted(t, album_artists)
+    ]
 
 
 def _apply_lastfm_track_info(track: Track, info: dict) -> None:
@@ -539,6 +557,7 @@ def _apply_lastfm_track_info(track: Track, info: dict) -> None:
 def backfill_lastfm_data(
     api_key: str,
     tracks: list[Track],
+    ignore_attempted: bool = False,
 ) -> list[Track]:
     """Fetch and apply Last.fm play counts, listeners, and tags.
 
@@ -546,12 +565,19 @@ def backfill_lastfm_data(
     Only fetches for tracks that don't already have Last.fm data. A track
     is marked attempted once Last.fm answered for it (found or not found);
     a failed request leaves it unmarked so the next run retries it.
+    ignore_attempted=True re-checks flagged tracks that still have no data.
     """
-    needs_lastfm = lastfm_track_candidates(tracks)
+    needs_lastfm = lastfm_track_candidates(tracks, ignore_attempted)
 
     if not needs_lastfm:
         logger.info("All tracks already have Last.fm data or were attempted")
         return tracks
+
+    if ignore_attempted:
+        # The old flag may come from a failed request; only this run's
+        # answer decides it now, so a failed retry is retried next run.
+        for t in needs_lastfm:
+            t.lastfm_track_attempted = False
 
     # A playlist can hold the same song more than once (re-uploads, re-adds),
     # so one lookup fans out to every track with that artist + title.
@@ -584,6 +610,7 @@ def backfill_lastfm_data(
 def backfill_lastfm_artist_tags(
     api_key: str,
     tracks: list[Track],
+    ignore_attempted: bool = False,
 ) -> list[Track]:
     """Fetch and apply Last.fm artist-level tags.
 
@@ -597,13 +624,17 @@ def backfill_lastfm_artist_tags(
 
     Only fetches for tracks that don't already have artist_tags populated,
     and never for channel uploads named after the channel.
+    ignore_attempted=True re-checks flagged tracks that still have no tags.
     """
     # Skip tracks we've already tried — even if they got no tags back.
     # This is the key efficiency win: ~150 obscure artists that returned
     # empty tag lists get re-queried on every sync without it.
-    needs_artist_tags = lastfm_artist_tag_candidates(tracks)
+    needs_artist_tags = lastfm_artist_tag_candidates(tracks, ignore_attempted)
 
-    channel_uploads = sum(1 for t in tracks if _wants_artist_tags(t)) - len(needs_artist_tags)
+    channel_uploads = (
+        sum(1 for t in tracks if _wants_artist_tags(t, ignore_attempted))
+        - len(needs_artist_tags)
+    )
     if channel_uploads:
         logger.info(
             "Skipping artist tags for %d channel upload(s) whose artist looks like "
@@ -613,6 +644,11 @@ def backfill_lastfm_artist_tags(
     if not needs_artist_tags:
         logger.info("All tracks already have artist tags or were attempted")
         return tracks
+
+    if ignore_attempted:
+        # See backfill_lastfm_data: only this run's answer sets the flag.
+        for t in needs_artist_tags:
+            t.lastfm_attempted = False
 
     # Map "first artist name" -> list of Track objects sharing that artist.
     # We split on comma and use the primary artist for the lookup, the same

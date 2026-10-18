@@ -159,6 +159,7 @@ python playlist_sync.py sync --limit 50        # Match at most 50 new tracks thi
 python playlist_sync.py sync --retry-unmatched # Also retry tracks that previously failed
 python playlist_sync.py retry-unmatched        # Standalone retry of previously failed matches
 python playlist_sync.py lastfm                 # Re-run Last.fm enrichment on the existing CSV
+python playlist_sync.py lastfm --retry-missing # Also retry rows flagged attempted that still have no data
 python playlist_sync.py classify               # Re-derive primary_genre and mood from tags
 python playlist_sync.py classify --force       # Re-classify even rows that already have values
 python playlist_sync.py sync-likes             # Mirror YT Music liked songs to Spotify Liked Songs
@@ -260,7 +261,7 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 | `lastfm_playcount`, `lastfm_listeners`, `lastfm_tags` | Last.fm `track.getInfo` |
 | **`artist_tags`** | Last.fm `artist.getInfo` — much denser than track tags |
 | `tag_source` | Which source filled `artist_tags` (`lastfm_artist`, …) |
-| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm already answered (found or not found); failed requests stay unset and are retried next run |
+| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm already answered (found or not found); failed requests stay unset and are retried next run. `lastfm --retry-missing` re-checks flagged rows that still have no data (CSVs enriched before 0.7.2) |
 | `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
 | `skip_reason` | Why the matcher pre-filtered this track (e.g. `no_album` for YT Music tracks lacking album metadata) — set means no Spotify search was attempted |
 | `match_attempted` | `true` once the matcher has run on this track. Tracks with `match_attempted=true AND no spotify_uri` are skipped on subsequent syncs unless `--retry-unmatched` is passed (or `retry-unmatched` is run standalone) |
