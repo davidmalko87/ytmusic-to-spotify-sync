@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ytmusic-to-spotify-sync"
-version = "0.7.1"
+version = "0.8.0"
 description = "Automatically sync your YouTube Music playlists to Spotify with smart track matching, diff-based updates, and metadata enrichment"
 readme = "README.md"
 license = "MIT"
@@ -15,7 +15,7 @@ dependencies = [
     "pandas>=2.0.0",
     "spotipy>=2.24.0",
     "ytmusicapi>=1.8.0",
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.3",
     "tqdm>=4.66.0",
 ]
 classifiers = [
@@ -30,6 +30,9 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
 [project.urls]
 Homepage = "https://github.com/davidmalko87/ytmusic-to-spotify-sync"
 Repository = "https://github.com/davidmalko87/ytmusic-to-spotify-sync"
@@ -38,3 +41,11 @@ Changelog = "https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master
 
 [project.scripts]
 ytmusic-sync = "playlist_sync.cli:main"
+
+[tool.setuptools.packages.find]
+# Explicit: a local data/ or build/ folder must never end up in the wheel
+include = ["playlist_sync*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

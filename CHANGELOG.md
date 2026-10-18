@@ -6,6 +6,45 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 
 ---
 
+## [0.8.0] - 2026-10-19
+
+### Added
+- **Setup wizard** (`setup` command, `S` in the menu). It asks for the YT Music login, picks the source playlist from your library, takes the Spotify app keys, picks or creates the Spotify playlist, and takes the optional Last.fm key. Each value is checked live and saved to `.env` for you: no `cp .env.example .env`, no manual editing. Finished steps are skipped on later runs, and `Ctrl+C` keeps what was entered.
+- **Redesigned interactive menu**. Setup status sits at the top with a "Next:" hint, and actions are grouped by task (Sync, Fix & maintain, Extras, YT Music backup, Settings). An action that needs missing setup offers to run only those wizard steps. Actions that change Spotify ask whether to run for real or as a dry run. `C` changes any single setting.
+- **YT Music backup**, no Spotify needed. `export-yt` saves Liked Songs, one playlist or the whole library (`--all`) as JSON + CSV under `data/exports/`. `import-yt` adds a file, another playlist or Liked Songs to a new or owned YT Music playlist. It skips tracks already there, falls back to one-by-one adds for unavailable videos, and stops cleanly when YT Music refuses all writes. Menu options 12 / 13.
+- **JSON copy of every enriched CSV** (`playlist_enriched.json`, `likes_enriched.json`). The `export` command / menu 9 still saves a copy wherever you choose.
+- **Playlist links accepted everywhere**: full YT Music / YouTube / Spotify links, in the wizard or in `.env`, are reduced to IDs.
+- **Friendlier YT Music login.** Accepts DevTools "Copy as cURL" (bash or cmd), the Chrome two-line format and raw headers. It explains in plain words why a paste failed (single line, missing `cookie` or `authorization`, selection started mid-cookie) and asks again. The new login is checked with YT Music before it replaces the old `browser.json`, and the temporary file is always removed.
+- **`PLAYLIST_SYNC_HOME`** environment variable to choose the settings folder (created if missing).
+- **Offline pytest suite** (`tests/`, 138 tests: the wizard and menu driven by scripted keystrokes, end-to-end sync integrity with fake APIs, export/import). Runs in CI together with a `--help` smoke test.
+
+### Fixed
+- **`.env.example` placeholder values are no longer treated as real.** `snapshot` / `diff` / `sync` with `YTMUSIC_PLAYLIST_ID=your_playlist_id_here` used to fail inside ytmusicapi with `Unable to find 'contents' ...`. They now stop with a clear message pointing to the setup wizard. The same goes for the Spotify keys, the Spotify playlist and the Last.fm key.
+- **pip / PyPI installs** read `.env` and wrote `data/`, `browser.json` and the log into `site-packages`. Installed copies now use one per-user folder: `%APPDATA%\ytmusic-to-spotify-sync`, `~/Library/Application Support/...` or `~/.config/...`. Git clones keep using the repo folder. On first run, the wizard offers to copy settings an older install left in `site-packages`.
+- **Sync data integrity**:
+  - Matches found before a rate limit or `Ctrl+C` were saved as "matched" but never added to Spotify. They are now pushed on the next run, after checking the playlist so nothing is added twice.
+  - An interrupted run kept the new snapshot, which lost pending YT removals. It also dropped previously-failed and not-yet-searched rows from the CSV.
+  - A dry run left a match cache that the next real run treated as already pushed.
+  - Switching the source (another YT playlist, or a CSV after a YT sync) diffed against the old snapshot and removed every old track from Spotify. Snapshots now record their source, and a different source counts as a first run. In the menu, switching the source offers to archive the old sync data.
+  - Tracks searched for the first time lost the Last.fm data their row already had.
+- **`pip install .`** from a checkout failed when a local `data/` folder existed (setuptools flat-layout discovery). Package discovery is now explicit.
+- **Spotify token cache** moved from `.cache` (often an existing directory such as `~/.cache`) to `.spotify_token_cache` in the settings folder. 0.7.x tokens are adopted automatically, so nobody has to log in again.
+- **Spotify login can be cancelled with `Ctrl+C` on Windows**: spotipy's redirect wait used to ignore it. A 403 now explains Spotify's Premium rule for developer apps.
+- **Spotify 2026 API**: playlist entries named `item` instead of `track` are read correctly, so `repush` can't mistake a full playlist for an empty one.
+- `sync-likes` no longer requires `SPOTIFY_PLAYLIST_ID`. After the YT Music login changes, the likes snapshot is reset, so another account's likes are never unsaved.
+- The default redirect URI is `http://127.0.0.1:8888/callback` (Spotify rejects `localhost`), matching `.env.example`.
+- A non-ASCII playlist title no longer crashes a run whose output is redirected (cron, Jenkins, Git Bash) or a menu prompt.
+- `.env` and `browser.json` are owner-only on Linux/macOS after every write.
+
+### Changed
+- Menu numbers changed (see README).
+- Relative `YTMUSIC_AUTH_FILE` / `SOURCE_CSV` paths resolve against the settings folder instead of the current directory.
+- `.env` is re-read on every menu redraw, so hand edits show up; real environment variables still win over `.env`.
+- `setup-ytmusic` exits with code 1 when no login was saved.
+- `python-dotenv>=1.2.3` (earlier versions lost backslashes in values such as Windows paths when writing `.env`).
+
+---
+
 ## [0.7.1] - 2026-05-07
 
 ### Fixed

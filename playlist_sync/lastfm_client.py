@@ -29,6 +29,33 @@ LASTFM_BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_DELAY_SEC = 0.25
 
 
+def check_api_key(api_key: str) -> str | None:
+    """Make one cheap Last.fm call; return None if the key works, else the reason."""
+    params = {
+        "method": "artist.getInfo",
+        "api_key": api_key,
+        "artist": "Radiohead",
+        "format": "json",
+    }
+    url = f"{LASTFM_BASE_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "YTMusicSync/0.8"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Last.fm answers a bad key with HTTP 403 and a JSON error body
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+        except (ValueError, OSError):
+            return f"Last.fm answered HTTP {e.code}"
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        return f"could not reach Last.fm ({e})"
+
+    if "error" in data:
+        return str(data.get("message") or f"Last.fm error {data['error']}")
+    return None
+
+
 def get_track_info(
     api_key: str,
     artist: str,
@@ -108,7 +135,7 @@ def get_tracks_info_batch(
             if consecutive_errors >= 50:
                 logger.warning(
                     "Last.fm: %d consecutive failures — stopping. "
-                    "Check your LASTFM_API_KEY in .env",
+                    "Check your Last.fm API key (menu C > Last.fm key, or the setup command)",
                     consecutive_errors,
                 )
                 break
@@ -196,7 +223,7 @@ def get_artists_info_batch(
             if consecutive_errors >= 50:
                 logger.warning(
                     "Last.fm: %d consecutive artist failures — stopping. "
-                    "Check your LASTFM_API_KEY in .env",
+                    "Check your Last.fm API key (menu C > Last.fm key, or the setup command)",
                     consecutive_errors,
                 )
                 break

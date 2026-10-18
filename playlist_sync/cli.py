@@ -1,8 +1,8 @@
 """
-CLI interface with argparse subcommands and interactive menu.
+CLI interface with argparse subcommands; the interactive menu lives in menu.py.
 Author: David
 Date: 2026-03-22
-Version: 0.1.0
+Version: 0.8.0
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from playlist_sync.config import (
+    PROJECT_ROOT,
     DEBUG_DIR,
     ENRICHED_CSV,
     LIKES_ENRICHED_CSV,
@@ -23,16 +24,22 @@ from playlist_sync.config import (
     SNAPSHOTS_DIR,
     UNMATCHED_CSV,
     ensure_dirs,
+    cli_command,
+    find_legacy_home,
     get_source_csv,
+    is_unset,
     load_config,
+    parse_ytmusic_playlist_id,
     require_spotify_config,
     require_ytmusic_config,
+    require_ytmusic_playlist,
 )
 from playlist_sync.csv_manager import (
     read_enriched_csv,
     read_source_csv,
     write_enriched_csv,
     write_skipped_csv,
+    write_tracks_json,
     write_unmatched_csv,
 )
 from playlist_sync.differ import diff_tracks
@@ -51,6 +58,7 @@ from playlist_sync.spotify_client import (
     RateLimitError,
     add_saved_tracks,
     add_tracks_to_playlist,
+    get_playlist_tracks,
     get_spotify_client,
     remove_saved_tracks,
     remove_tracks_from_playlist,
@@ -60,109 +68,12 @@ from playlist_sync.ytmusic_client import (
     LikedSongsAuthError,
     fetch_liked_tracks,
     fetch_playlist_tracks,
+    latest_snapshot_playlist_id,
     load_latest_likes_snapshot,
     load_latest_snapshot,
     save_likes_snapshot,
     save_snapshot,
-    setup_browser_auth,
 )
-
-
-# ── Interactive menu ────────────────────────────────────────────────
-
-MENU_OPTIONS = [
-    ("1",  "Setup YT Music auth",                   "setup-ytmusic"),
-    ("2",  "Import from CSV",                       "import-csv"),
-    ("3",  "Snapshot YT Music playlist",            "snapshot"),
-    ("4",  "Show diff (changes)",                   "diff"),
-    ("5",  "Full sync to Spotify",                  "sync"),
-    ("6",  "Sync from CSV file",                    "sync-csv"),
-    ("7",  "Retry unmatched tracks",                "retry-unmatched"),
-    ("8",  "Enrich with Last.fm",                   "lastfm"),
-    ("9",  "Classify genre + mood from tags",       "classify"),
-    ("10", "Sync Liked Songs (YTM <- -> Spotify)",  "sync-likes"),
-    ("11", "Export enriched data to JSON",          "export"),
-    ("12", "Re-push to recreated Spotify playlist", "repush"),
-    ("13", "Show status",                           "status"),
-    ("0",  "Exit",                                  "exit"),
-]
-
-
-def interactive_menu() -> None:
-    """Show an interactive menu in a loop until user exits."""
-    while True:
-        print()
-        print("=" * 50)
-        print("  Playlist Sync: YT Music -> Spotify")
-        print("=" * 50)
-        print()
-
-        for key, label, _ in MENU_OPTIONS:
-            print(f"  [{key}] {label}")
-
-        print()
-
-        try:
-            choice = input("Select an option: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        # Map choice to command
-        cmd = None
-        for key, _, command in MENU_OPTIONS:
-            if choice == key:
-                cmd = command
-                break
-
-        if cmd is None:
-            print(f"Unknown option: {choice}")
-            continue
-        if cmd == "exit":
-            break
-
-        # Ask about dry-run for commands that support it
-        dry_run = False
-        if cmd in (
-            "import-csv", "snapshot", "sync", "sync-csv",
-            "retry-unmatched", "lastfm", "classify", "export", "sync-likes", "repush",
-        ):
-            try:
-                dr = input("Dry run? (y/N): ").strip().lower()
-                dry_run = dr in ("y", "yes")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-
-        # Build a fake namespace and dispatch
-        args = argparse.Namespace(
-            command=cmd,
-            verbose=False,
-            dry_run=dry_run,
-            csv=None,
-            from_csv=None,
-            force=False,
-            output=None,
-            retry_unmatched=False,
-            replace=False,
-        )
-
-        if cmd == "sync-csv":
-            args.command = "sync"
-            args.from_csv = "default"
-
-        try:
-            dispatch(args)
-        except SystemExit:
-            pass
-        except Exception as e:
-            print(f"\nError: {e}")
-
-        try:
-            input("\nPress Enter to continue...")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
 
 
 # ── Debug stats writer ──────────────────────────────────────────────
@@ -267,19 +178,82 @@ def _save_match_cache(cache: dict[str, dict]) -> None:
     )
 
 
+def _missing_from_playlist(sp: object, config: dict[str, str], uris: list[str]) -> list[str]:
+    """The URIs not yet in the target playlist (only fetched when there is something to check)."""
+    if not uris:
+        return []
+    present = {t.get("uri") for t in get_playlist_tracks(sp, config["SPOTIFY_PLAYLIST_ID"])}
+    return [u for u in dict.fromkeys(uris) if u not in present]
+
+
+def _push_and_mark(sp: object, config: dict[str, str], uris: list[str],
+                   match_cache: dict[str, dict], dry_run: bool) -> bool:
+    """Add URIs to the playlist; mark them pushed in the match cache when all went in.
+
+    Returns True when everything was added (or there was nothing to add).
+    """
+    if not uris:
+        return True
+    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris, dry_run=dry_run)
+    action = "[DRY RUN] Would add" if dry_run else "Added"
+    print(f"{action} {added} tracks to Spotify playlist")
+    if dry_run:
+        return True
+    if added < len(uris):
+        print(f"{len(uris) - added} matched track(s) could not be added; run "
+              f"'{cli_command()} repush' (menu 6) to add them.")
+        return False
+    pushed = set(uris)
+    for entry in match_cache.values():
+        if entry.get("spotify_uri") in pushed:
+            entry["pushed"] = True
+    return True
+
+
 def _clear_match_cache() -> None:
     """Remove match cache after successful sync."""
     if MATCH_CACHE.exists():
         MATCH_CACHE.unlink()
 
 
+def _snapshot_for(playlist_id: str) -> list[Track] | None:
+    """Latest snapshot, or None when it belongs to a different YT Music playlist.
+
+    Without this, switching the source playlist would diff the new playlist
+    against the old one and remove every old track from the Spotify playlist.
+    """
+    recorded = latest_snapshot_playlist_id()
+    if recorded and playlist_id and recorded != playlist_id:
+        print(f"Note: the last snapshot is of a different source ({recorded}).")
+        print("Comparing as a first run: nothing is removed from Spotify this time.")
+        return None
+    return load_latest_snapshot()
+
+
 # ── Command handlers ────────────────────────────────────────────────
 
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Guided setup wizard: logins, playlists and API keys, saved to .env."""
+    from playlist_sync.menu import Cancelled, run_setup_wizard
+
+    setup_logging(args.verbose)
+    try:
+        run_setup_wizard()
+    except (Cancelled, KeyboardInterrupt):
+        print("\nSetup stopped. Finished steps are saved; run setup again to continue.")
+
+
 def cmd_setup_ytmusic(args: argparse.Namespace) -> None:
-    """Interactive YT Music browser auth setup."""
-    config = load_config()
-    output = config["YTMUSIC_AUTH_FILE"]
-    setup_browser_auth(output)
+    """Interactive YT Music browser auth setup (verified before it replaces the old login)."""
+    from playlist_sync.menu import Cancelled, read_state, step_yt_login
+
+    try:
+        saved = step_yt_login(read_state())
+    except (Cancelled, KeyboardInterrupt):
+        print("\nYT Music login was not changed.")
+        saved = False
+    if not saved:
+        sys.exit(1)
 
 
 def cmd_import_csv(args: argparse.Namespace) -> None:
@@ -313,7 +287,7 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
 
     write_enriched_csv(tracks)
     print(f"Initial enriched CSV written: {ENRICHED_CSV}")
-    print("\nNext: set up .env credentials, then run 'sync' to match tracks to Spotify")
+    print("\nNext: finish setup (S in the menu, or the 'setup' command), then sync.")
 
 
 def cmd_snapshot(args: argparse.Namespace) -> None:
@@ -321,6 +295,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     setup_logging(args.verbose)
     config = load_config()
     require_ytmusic_config(config)
+    require_ytmusic_playlist(config)
     ensure_dirs()
 
     tracks = fetch_playlist_tracks(config["YTMUSIC_AUTH_FILE"], config["YTMUSIC_PLAYLIST_ID"])
@@ -330,7 +305,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         print("[DRY RUN] Would save snapshot")
         return
 
-    snapshot_path = save_snapshot(tracks)
+    snapshot_path = save_snapshot(tracks, config["YTMUSIC_PLAYLIST_ID"])
     print(f"Snapshot saved: {snapshot_path.name}")
 
 
@@ -339,10 +314,11 @@ def cmd_diff(args: argparse.Namespace) -> None:
     setup_logging(args.verbose)
     config = load_config()
     require_ytmusic_config(config)
+    require_ytmusic_playlist(config)
 
     print("Fetching current YT Music playlist...")
     current = fetch_playlist_tracks(config["YTMUSIC_AUTH_FILE"], config["YTMUSIC_PLAYLIST_ID"])
-    previous = load_latest_snapshot()
+    previous = _snapshot_for(config["YTMUSIC_PLAYLIST_ID"])
 
     result = diff_tracks(current, previous)
 
@@ -384,6 +360,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         print(f"Loaded {len(current)} tracks from CSV")
     else:
         require_ytmusic_config(config)
+        require_ytmusic_playlist(config)
         print("Fetching current YT Music playlist...")
         current = fetch_playlist_tracks(config["YTMUSIC_AUTH_FILE"], config["YTMUSIC_PLAYLIST_ID"])
         print(f"Fetched {len(current)} tracks")
@@ -392,8 +369,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
     existing = read_enriched_csv()
     existing_map: dict[str, Track] = {t.fingerprint: t for t in existing}
 
-    # Step 3: Diff
-    previous = load_latest_snapshot()
+    # Step 3: Diff (only against a snapshot of this same playlist -- diffing
+    # against another playlist would remove all of its tracks from Spotify)
+    snapshot_id = f"csv:{csv_path.resolve()}" if args.from_csv else config["YTMUSIC_PLAYLIST_ID"]
+    previous = _snapshot_for(snapshot_id)
     diff = diff_tracks(current, previous)
     print(f"Diff: {diff.summary()}")
 
@@ -418,11 +397,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
         ):
             # We've tried matching this track at least once and it failed —
             # don't waste Spotify search quota on it every sync. Use
-            # `retry-unmatched` (option 7) or `sync --retry-unmatched` to
+            # `retry-unmatched` (menu option 5) or `sync --retry-unmatched` to
             # explicitly retry these.
             previously_failed.append(existing_map[fp])
         else:
-            needs_matching.append(track)
+            # Reuse the existing row so enrichment it already has (Last.fm
+            # tags from a 'lastfm' run, say) survives the match
+            needs_matching.append(existing_map.get(fp, track))
 
     # Skip-filter: YT Music tracks without album metadata are typically
     # YouTube uploads, fan edits, mixes, or other content without a real
@@ -453,6 +434,24 @@ def cmd_sync(args: argparse.Namespace) -> None:
     print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}, "
           f"skipped: {len(skipped_tracks)}, previously-failed: {len(previously_failed)}")
 
+    def rows_to_keep(include_removed: bool = False) -> list[Track]:
+        """Results so far plus every row not processed this run (limit, interruption).
+
+        include_removed keeps the rows of tracks removed on YT Music, for exits
+        that did not remove them from Spotify yet: the next run needs their URIs.
+        """
+        rows = already_matched + unmatched_tracks + skipped_tracks + previously_failed
+        seen = {t.fingerprint for t in rows}
+        leftovers = list(needs_matching)
+        if include_removed:
+            leftovers += [existing_map[t.fingerprint] for t in diff.removed
+                          if t.fingerprint in existing_map]
+        for t in leftovers:
+            if t.fingerprint not in seen:
+                rows.append(existing_map.get(t.fingerprint, t))
+                seen.add(t.fingerprint)
+        return rows
+
     # Check if any matched tracks still need enrichment (backfill)
     needs_enrichment = any(
         not t.popularity or not t.artist_genres or not t.lastfm_playcount or not t.artist_tags
@@ -464,23 +463,26 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # This way enrichment data is saved even if matching hits rate limits.
     if already_matched and not args.dry_run:
         lastfm_key = config.get("LASTFM_API_KEY", "")
-        if lastfm_key and needs_enrichment:
+        if not is_unset(lastfm_key) and needs_enrichment:
             print("\nFetching Last.fm track data...")
             backfill_lastfm_data(lastfm_key, already_matched)
             print("Fetching Last.fm artist tags...")
             backfill_lastfm_artist_tags(lastfm_key, already_matched)
 
-    if not needs_matching and not diff.removed and not needs_enrichment:
+    # Matches an earlier interrupted run found but never pushed. They may already
+    # be marked matched in the CSV, so they are taken from the cache directly.
+    match_cache = _load_match_cache() if not args.dry_run else {}
+    restored_unpushed = [
+        e["spotify_uri"] for e in match_cache.values()
+        if e.get("matched") and e.get("spotify_uri") and not e.get("pushed")
+    ]
+
+    if not needs_matching and not diff.removed and not needs_enrichment and not restored_unpushed:
         # Still save if we just enriched
         if not args.dry_run:
-            all_tracks = already_matched + [
-                t for t in current if not any(
-                    t.fingerprint == m.fingerprint for m in already_matched
-                )
-            ]
-            write_enriched_csv(already_matched)
+            write_enriched_csv(rows_to_keep())
             print(f"Enriched CSV updated: {ENRICHED_CSV}")
-            save_snapshot(current)
+            save_snapshot(current, snapshot_id)
         print("Nothing new to match.")
         return
 
@@ -488,7 +490,6 @@ def cmd_sync(args: argparse.Namespace) -> None:
     sp = get_spotify_client(config)
     matched_results = []
     unmatched_tracks: list[Track] = []
-    match_cache = _load_match_cache()
 
     if needs_matching:
         # Skip tracks already in cache from previous interrupted run
@@ -515,9 +516,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
                     )
                     enriched_track = apply_match_to_track(track, result)
                     already_matched.append(enriched_track)
-                    # Do NOT append to matched_results here — these tracks are
-                    # already in the Spotify playlist from a previous run.
-                    # Only newly searched tracks should be added again.
+                    # Not added to matched_results: unpushed ones are already in
+                    # restored_unpushed and get pushed (if missing) below
                 else:
                     unmatched_tracks.append(track)
             else:
@@ -560,43 +560,58 @@ def cmd_sync(args: argparse.Namespace) -> None:
                             "popularity": result.popularity,
                             "album_type": result.album_type,
                             "track_number": result.track_number,
+                            "pushed": False,
                         }
                     else:
                         unmatched_tracks.append(track)
                         match_cache[fp] = {"matched": False}
 
-                    # Save cache every 25 tracks for safety
-                    if len(match_cache) % 25 == 0:
+                    # Save cache every 25 tracks for safety (never for a dry run:
+                    # its matches were not pushed and must not look resumable)
+                    if not args.dry_run and len(match_cache) % 25 == 0:
                         _save_match_cache(match_cache)
 
-            except RateLimitError as e:
-                _save_match_cache(match_cache)
+            except (RateLimitError, KeyboardInterrupt) as e:
                 matched_so_far = len(matched_results)
-                remaining = len(to_search) - matched_so_far
-                hrs = e.retry_after / 3600
-                print(f"\n\nRate limited! Progress saved ({matched_so_far} matched).")
-                print(f"Remaining: {remaining} tracks")
-                print(f"Wait ~{hrs:.1f}h then re-run: python playlist_sync.py sync")
-                print("Your progress will be restored automatically.")
+                searched = sum(1 for t in to_search if t.match_attempted)
+                if isinstance(e, RateLimitError):
+                    hrs = e.retry_after / 3600
+                    print(f"\n\nRate limited by Spotify! Progress saved ({matched_so_far} matched).")
+                    print(f"Wait ~{hrs:.1f}h, then sync again: {cli_command()} sync")
+                else:
+                    print(f"\n\nStopped. Progress saved ({matched_so_far} matched).")
+                    print(f"Sync again any time to continue: {cli_command()} sync")
+                print(f"Still to search: {len(to_search) - searched} tracks. "
+                      "They are picked up automatically next time.")
 
-                # Save enriched CSV with whatever we have so far
+                # Push what already matched when the user stopped. After a rate
+                # limit every Spotify call would wait out Retry-After (hours), so
+                # the matches stay in the cache as unpushed for the next run.
+                if isinstance(e, KeyboardInterrupt):
+                    try:
+                        push_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
+                            [r.spotify_uri for r in matched_results]
+                        _push_and_mark(sp, config, push_uris, match_cache, args.dry_run)
+                    except KeyboardInterrupt:
+                        print("\nPush interrupted - the next sync adds the rest.")
+                elif matched_results:
+                    print(f"The {len(matched_results)} new match(es) are added to Spotify "
+                          "by the next sync.")
+
+                # Save every row and keep the old snapshot: removals on YT Music
+                # were not applied yet, so the next run must still see them
                 if not args.dry_run:
-                    all_tracks = already_matched + unmatched_tracks
-                    write_enriched_csv(all_tracks)
+                    _save_match_cache(match_cache)
+                    write_enriched_csv(rows_to_keep(include_removed=True))
                     print(f"Enriched CSV saved: {ENRICHED_CSV}")
-                    save_snapshot(current)
                 return
 
         print(f"Matched: {len(matched_results)}, Unmatched: {len(unmatched_tracks)}")
 
-    # Step 6: Push to Spotify
-    new_uris = [r.spotify_uri for r in matched_results]
-    if new_uris:
-        added = add_tracks_to_playlist(
-            sp, config["SPOTIFY_PLAYLIST_ID"], new_uris, dry_run=args.dry_run,
-        )
-        action = "[DRY RUN] Would add" if args.dry_run else "Added"
-        print(f"{action} {added} tracks to Spotify playlist")
+    # Step 6: Push to Spotify (plus cached matches an interrupted run never pushed)
+    new_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
+        [r.spotify_uri for r in matched_results]
+    fully_pushed = _push_and_mark(sp, config, new_uris, match_cache, args.dry_run)
 
     if diff.removed:
         remove_uris = []
@@ -623,20 +638,20 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # Last.fm enrichment for newly matched tracks (already_matched from
         # previous runs were enriched in Step 5; this catches new matches)
         lastfm_key = config.get("LASTFM_API_KEY", "")
-        if lastfm_key:
+        if not is_unset(lastfm_key):
             print("Fetching Last.fm track data for new matches...")
             backfill_lastfm_data(lastfm_key, already_matched)
             print("Fetching Last.fm artist tags for new matches...")
             backfill_lastfm_artist_tags(lastfm_key, already_matched)
         else:
-            print("Skipping Last.fm enrichment (no LASTFM_API_KEY in .env)")
+            print("Skipping Last.fm enrichment (optional - add a key with menu C > Last.fm key)")
 
     # Step 8: Classify tags into primary_genre + mood (no API calls)
     if not args.dry_run:
         # previously_failed tracks must be included in the CSV write so
         # their match_attempted=True flag survives the round-trip; otherwise
         # next sync would treat them as fresh again.
-        all_tracks = already_matched + unmatched_tracks + skipped_tracks + previously_failed
+        all_tracks = rows_to_keep()
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
@@ -656,7 +671,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             write_skipped_csv(skipped_tracks)
             print(f"Skipped tracks saved: {SKIPPED_CSV}")
 
-        save_snapshot(current)
+        save_snapshot(current, snapshot_id)
         print("Snapshot updated.")
 
         # Per-run debug stats — structured JSON for downstream analysis
@@ -670,7 +685,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
             diff=diff,
         )
 
-    _clear_match_cache()
+    if not args.dry_run:
+        if fully_pushed:
+            _clear_match_cache()
+        else:
+            _save_match_cache(match_cache)  # keep unpushed matches for the next run
 
     # Sync summary
     limit = getattr(args, "limit", None)
@@ -689,7 +708,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     if limit and total_still_pending > 0:
         print(f"\nPartial sync complete. {total_still_pending} tracks still need matching.")
-        print(f"Re-run tomorrow: python playlist_sync.py sync --limit {limit}")
+        print(f"Re-run tomorrow: {cli_command()} sync --limit {limit}")
     else:
         print("\nSync complete!")
 
@@ -754,9 +773,10 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
     ensure_dirs()
 
     lastfm_key = config.get("LASTFM_API_KEY", "")
-    if not lastfm_key:
-        print("Error: LASTFM_API_KEY not set in .env")
-        print("Get a free key at: https://www.last.fm/api/account/create")
+    if is_unset(lastfm_key):
+        print("Error: no Last.fm API key yet (LASTFM_API_KEY).")
+        print("Get a free key at https://www.last.fm/api/account/create and add it with")
+        print("the setup wizard ('setup' command, or C in the interactive menu).")
         sys.exit(1)
 
     # Load tracks: prefer enriched CSV, fall back to snapshot
@@ -767,7 +787,7 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
         snapshot_tracks = load_latest_snapshot()
         if not snapshot_tracks:
             print("Error: no enriched CSV or snapshot found.")
-            print("Run option 3 (Snapshot) or option 5 (Full sync) first.")
+            print("Run 'snapshot' or 'sync' first (menu options 11 / 1).")
             sys.exit(1)
         tracks = snapshot_tracks
         print(f"Loaded {len(tracks)} tracks from latest snapshot")
@@ -981,19 +1001,98 @@ def cmd_export(args: argparse.Namespace) -> None:
         print(f"[DRY RUN] Would export {len(tracks)} tracks to {output_path}")
         return
 
-    import json
-    from datetime import datetime
-    payload = {
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
-        "track_count": len(tracks),
-        "tracks": [t.to_csv_row() for t in tracks],
-    }
-    output_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    write_tracks_json(tracks, output_path)
     size_kb = output_path.stat().st_size / 1024
     print(f"Exported {len(tracks)} tracks to {output_path} ({size_kb:.1f} KB)")
+
+
+def cmd_export_yt(args: argparse.Namespace) -> None:
+    """Export a YT Music playlist, Liked Songs or the whole library to JSON + CSV."""
+    from playlist_sync import yt_transfer
+
+    setup_logging(args.verbose)
+    config = load_config()
+    require_ytmusic_config(config)
+    auth_file = config["YTMUSIC_AUTH_FILE"]
+
+    if getattr(args, "all", False):
+        if args.dry_run:
+            print("[DRY RUN] Would export Liked Songs and every playlist in your library")
+            return
+        print("Exporting Liked Songs and every playlist in your library...")
+        folder, written, failed = yt_transfer.export_library(auth_file)
+        print(f"\nExported {written} playlist(s) to {folder}")
+        if failed:
+            print(f"Could not export {len(failed)}: {', '.join(failed)}")
+            sys.exit(1)
+        return
+
+    raw = getattr(args, "playlist", None) or config["YTMUSIC_PLAYLIST_ID"]
+    if yt_transfer.is_liked(raw):
+        playlist_id = yt_transfer.LIKED_ID
+    else:
+        playlist_id = parse_ytmusic_playlist_id(raw)
+        if not playlist_id:
+            print("Error: say which playlist to export: --playlist <ID or link>, --playlist liked,")
+            print("or --all (or choose a YT Music playlist with the setup wizard).")
+            sys.exit(1)
+    if args.dry_run:
+        print(f"[DRY RUN] Would export YT Music playlist {playlist_id}")
+        return
+    try:
+        json_path, csv_path, count = yt_transfer.export_playlist(auth_file, playlist_id, args.output)
+    except LikedSongsAuthError as e:
+        print(f"\n{e}\n")
+        sys.exit(1)
+    print(f"Exported {count} tracks:")
+    print(f"  {json_path}")
+    print(f"  {csv_path}")
+
+
+def cmd_import_yt(args: argparse.Namespace) -> None:
+    """Copy tracks from an export file or a YT Music playlist into a YT Music playlist."""
+    from playlist_sync import yt_transfer
+
+    setup_logging(args.verbose)
+    config = load_config()
+    require_ytmusic_config(config)
+    auth_file = config["YTMUSIC_AUTH_FILE"]
+
+    target_id = None
+    if getattr(args, "to", None):
+        target_id = yt_transfer.LIKED_ID if yt_transfer.is_liked(args.to) else \
+            parse_ytmusic_playlist_id(args.to)
+        if not target_id or target_id == yt_transfer.LIKED_ID:
+            print("Error: --to must be one of your own YT Music playlists (ID or link).")
+            sys.exit(1)
+
+    try:
+        title, video_ids, without_id = yt_transfer.collect_source(auth_file, args.source)
+        print(f"Source: {title} - {len(video_ids)} tracks with a YouTube video ID")
+        if without_id:
+            print(f"  {without_id} row(s) have no YouTube video ID and are skipped "
+                  "(e.g. tracks that came from Spotify).")
+        summary = yt_transfer.import_to_playlist(
+            auth_file, video_ids, target_id=target_id,
+            new_name=getattr(args, "new_name", None) or title,
+            privacy=getattr(args, "privacy", "private"), dry_run=args.dry_run,
+        )
+    except (yt_transfer.TransferError, LikedSongsAuthError, RuntimeError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    prefix = "[DRY RUN] Would add" if args.dry_run else "Added"
+    added = summary["to_add"] if args.dry_run else summary["added"]
+    print(f"{prefix} {added} track(s); {summary['already_there']} already in the playlist, "
+          f"{summary['duplicates_in_source']} duplicate(s) in the source.")
+    if summary["playlist_id"]:
+        print(f"Playlist: https://music.youtube.com/playlist?list={summary['playlist_id']}")
+    failed = summary["failed"]
+    if failed:
+        print(f"{len(failed)} track(s) could not be added (unavailable in your region or removed):")
+        for video_id in failed[:20]:
+            print(f"  https://music.youtube.com/watch?v={video_id}")
+        sys.exit(1)
 
 
 def cmd_sync_likes(args: argparse.Namespace) -> None:
@@ -1010,7 +1109,7 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
     """
     setup_logging(args.verbose)
     config = load_config()
-    require_spotify_config(config)
+    require_spotify_config(config, need_playlist=False)
     require_ytmusic_config(config)
     ensure_dirs()
 
@@ -1144,6 +1243,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     ensure_dirs()
 
     print("=== Playlist Sync Status ===\n")
+    print(f"Settings:      {PROJECT_ROOT}")
 
     # Source CSV
     source = get_source_csv(config)
@@ -1151,7 +1251,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         tracks = read_source_csv(source)
         print(f"Source CSV:    {len(tracks)} tracks ({source.name})")
     else:
-        print("Source CSV:    not configured (set SOURCE_CSV in .env)")
+        print("Source CSV:    not configured (optional; set it with the setup wizard)")
 
     # Enriched CSV
     if ENRICHED_CSV.exists():
@@ -1200,7 +1300,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
-    sub.add_parser("setup-ytmusic", help="Interactive YT Music browser auth setup")
+    sub.add_parser(
+        "setup", help="Guided setup: YT Music login, both playlists, Spotify and Last.fm keys",
+    )
+    sub.add_parser("setup-ytmusic", help="Only the YT Music login step of the setup wizard")
 
     p_import = sub.add_parser("import-csv", help="Bootstrap from existing CSV export")
     p_import.add_argument("--csv", help="Path to CSV file")
@@ -1247,6 +1350,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
     p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
 
+    p_xyt = sub.add_parser(
+        "export-yt",
+        help="Export a YT Music playlist or Liked Songs to JSON + CSV (no Spotify needed)",
+    )
+    p_xyt.add_argument(
+        "--playlist", "-p",
+        help="Playlist ID or link, or 'liked' for Liked Songs (default: YTMUSIC_PLAYLIST_ID)",
+    )
+    p_xyt.add_argument("--all", action="store_true",
+                       help="Export Liked Songs and every playlist in your library")
+    p_xyt.add_argument("--output", "-o", help="Output .json path (a .csv is written next to it)")
+    p_xyt.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
+    p_iyt = sub.add_parser(
+        "import-yt",
+        help="Copy tracks from an export file or a YT Music playlist into a YT Music playlist",
+    )
+    p_iyt.add_argument(
+        "source",
+        help="Export file (.json/.csv) or a YT Music playlist ID/link ('liked' for Liked Songs)",
+    )
+    target = p_iyt.add_mutually_exclusive_group()
+    target.add_argument("--to", help="One of your playlists (ID or link); missing tracks are added")
+    target.add_argument("--new-name", help="Create a new playlist with this name (default: source name)")
+    p_iyt.add_argument("--privacy", choices=["private", "unlisted", "public"], default="private",
+                       help="Visibility of a new playlist (default: private)")
+    p_iyt.add_argument("--dry-run", action="store_true", help="Preview without writing")
+
     sub.add_parser("status", help="Show sync statistics")
 
     return parser
@@ -1255,6 +1386,7 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace) -> None:
     """Route to the correct command handler."""
     commands = {
+        "setup": cmd_setup,
         "setup-ytmusic": cmd_setup_ytmusic,
         "import-csv": cmd_import_csv,
         "snapshot": cmd_snapshot,
@@ -1265,6 +1397,8 @@ def dispatch(args: argparse.Namespace) -> None:
         "classify": cmd_classify,
         "export": cmd_export,
         "sync-likes": cmd_sync_likes,
+        "export-yt": cmd_export_yt,
+        "import-yt": cmd_import_yt,
         "repush": cmd_repush,
         "status": cmd_status,
     }
@@ -1275,11 +1409,24 @@ def dispatch(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """CLI entry point."""
+    # Redirected output on Windows uses a legacy code page; a Cyrillic or emoji
+    # title must print as '?' rather than abort a backup halfway
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     parser = build_parser()
     args = parser.parse_args()
 
+    legacy = find_legacy_home()
+    if legacy and args.command not in (None, "setup"):
+        print(f"Note: settings from an older version were found in {legacy}.")
+        print(f"Copy them into the new settings folder with: {cli_command()} setup")
+
     if not args.command:
-        # No subcommand given -- show interactive menu
+        # No subcommand given -- show interactive menu (imported lazily: menu imports cli)
+        from playlist_sync.menu import interactive_menu
         interactive_menu()
     else:
         dispatch(args)

@@ -1,12 +1,13 @@
 """
-CSV I/O for playlist data files (BOM-aware).
+CSV I/O for playlist data files (BOM-aware), plus JSON copies of the enriched data.
 Author: David
 Date: 2026-03-22
-Version: 0.1.0
+Version: 0.8.0
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -60,16 +61,36 @@ def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
         print(f"WARNING: {path.name} is locked (open in Excel?). Saved to: {fallback.name}")
 
 
+def write_tracks_json(tracks: list[Track], path: Path) -> Path:
+    """Write tracks as {exported_at, track_count, tracks: [...]} JSON (same fields as the CSV)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "track_count": len(tracks),
+        "tracks": [t.to_csv_row() for t in tracks],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> None:
-    """Write tracks to the enriched CSV."""
+    """Write tracks to the enriched CSV and a JSON copy beside it (same name, .json)."""
     path = path or ENRICHED_CSV
     path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = [t.to_csv_row() for t in tracks]
     df = pd.DataFrame(rows, columns=ENRICHED_COLUMNS)
     _safe_csv_write(df, path)
-
     logger.info("Wrote %d tracks to enriched CSV: %s", len(tracks), path)
+
+    # The JSON copy is a convenience: a failure must not lose the sync result
+    json_path = path.with_suffix(".json")
+    try:
+        write_tracks_json(tracks, json_path)
+        logger.info("Wrote JSON copy: %s", json_path)
+    except OSError as e:
+        logger.warning("Could not write JSON copy %s: %s", json_path, e)
+        print(f"WARNING: could not write {json_path.name} ({e}); the CSV is up to date.")
 
 
 def write_unmatched_csv(tracks: list[Track], path: Path | None = None) -> None:
