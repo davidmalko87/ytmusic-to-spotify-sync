@@ -14,17 +14,17 @@ from pathlib import Path
 from tqdm import tqdm
 
 from playlist_sync.config import (
-    PROJECT_ROOT,
     DEBUG_DIR,
     ENRICHED_CSV,
     LIKES_ENRICHED_CSV,
     LIKES_UNMATCHED_CSV,
     MATCH_CACHE,
+    PROJECT_ROOT,
     SKIPPED_CSV,
     SNAPSHOTS_DIR,
     UNMATCHED_CSV,
-    ensure_dirs,
     cli_command,
+    ensure_dirs,
     find_legacy_home,
     get_source_csv,
     is_unset,
@@ -74,7 +74,6 @@ from playlist_sync.ytmusic_client import (
     save_likes_snapshot,
     save_snapshot,
 )
-
 
 # ── Debug stats writer ──────────────────────────────────────────────
 

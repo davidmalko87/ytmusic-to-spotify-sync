@@ -27,7 +27,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pytest
+          # ruff pinned: new releases widen the default rules and would fail
+          # unrelated PRs; bump it deliberately (also in pyproject's [dev] extra)
+          pip install "ruff==0.17.1" pytest
 
       - name: Lint with ruff
         run: ruff check .

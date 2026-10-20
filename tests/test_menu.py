@@ -17,9 +17,8 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
-from playlist_sync import cli
+from playlist_sync import cli, menu
 from playlist_sync import config as cfg
-from playlist_sync import menu
 from playlist_sync.csv_manager import write_enriched_csv
 from playlist_sync.models import Track
 

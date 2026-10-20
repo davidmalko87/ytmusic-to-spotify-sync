@@ -30,6 +30,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from spotipy.exceptions import SpotifyBaseException
+from ytmusicapi.exceptions import YTMusicError
+
 from playlist_sync import __version__
 from playlist_sync import config as cfg
 from playlist_sync.lastfm_client import check_api_key
@@ -47,6 +50,13 @@ from playlist_sync.ytmusic_client import (
 )
 
 logger = logging.getLogger("playlist_sync")
+
+# What the YT Music / Spotify libraries raise for bad logins, unknown playlists
+# and HTTP or network failures (requests errors are OSError; ytmusicapi raises
+# KeyError when a page has an unexpected shape). Anything else is a bug: it
+# reaches _run_safely, which reports it and logs the traceback.
+API_ERRORS = (YTMusicError, SpotifyBaseException, OSError, LookupError, ValueError,
+              TypeError, RuntimeError)
 
 WIDTH = 66
 SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
@@ -297,7 +307,7 @@ def _verify_yt_login(auth_file: str, replacing: bool) -> bool:
     print("\nChecking the login with YT Music...")
     try:
         playlists = list_library_playlists(auth_file)
-    except Exception as e:  # ytmusicapi raises several unrelated types here
+    except API_ERRORS as e:
         warn(f"YT Music did not accept this login: {e}")
         return False
     if playlists:
@@ -362,7 +372,7 @@ def _paste_yt_playlist(auth_file: str) -> dict[str, str] | None:
             continue
         try:
             return get_playlist_info(auth_file, playlist_id)
-        except Exception as e:  # unknown or private playlists fail deep inside ytmusicapi
+        except API_ERRORS as e:  # unknown or private playlists fail deep inside ytmusicapi
             logger.debug("get_playlist failed for %s: %s", playlist_id, e)
             warn("YT Music could not open that playlist. Check the link, and that the")
             warn("playlist belongs to (or is shared with) the account you logged in with.")
@@ -379,7 +389,7 @@ def step_yt_playlist(state: SetupState) -> bool:
     print("\nLoading your YT Music playlists...")
     try:
         playlists = list_library_playlists(auth_file)
-    except Exception as e:
+    except API_ERRORS as e:
         warn(f"Could not load your playlists ({e}). You can paste a link instead.")
         playlists = []
 
@@ -571,7 +581,7 @@ def spotify_login():  # -> spotipy.Spotify | None (spotipy types stay out of the
             user = sp.current_user()
             result["name"] = user.get("display_name") or user.get("id")
             result["sp"] = sp
-        except Exception as e:  # spotipy wraps OAuth and HTTP failures in different types
+        except Exception as e:  # noqa: BLE001 - the worker must hand every failure to the main thread
             result["error"] = e
 
     if not _local_redirect(config["SPOTIPY_REDIRECT_URI"]):
@@ -621,7 +631,7 @@ def _paste_spotify_playlist(sp) -> dict[str, str] | None:
             continue
         try:
             access = get_playlist_access(sp, playlist_id)
-        except Exception as e:
+        except API_ERRORS as e:
             warn(f"Spotify could not open that playlist ({e}).")
             continue
         name = str(access["name"])
@@ -644,7 +654,7 @@ def step_spotify_playlist(state: SetupState) -> bool:
     print("\nLoading your Spotify playlists...")
     try:
         playlists = list_my_playlists(sp)
-    except Exception as e:
+    except API_ERRORS as e:
         warn(f"Could not load your playlists ({e}).")
         playlists = []
 
@@ -668,7 +678,7 @@ def step_spotify_playlist(state: SetupState) -> bool:
             info: dict[str, str] | None = create_playlist(
                 sp, name, "Synced from YT Music by ytmusic-to-spotify-sync",
             )
-        except Exception as e:
+        except API_ERRORS as e:
             warn(f"Spotify did not create the playlist: {e}")
             return False
         ok(f"Created private playlist '{name}'.")
@@ -851,9 +861,10 @@ def run_setup_wizard() -> None:
                 continue
         elif step.optional and not confirm("Set it up now? (optional)", default=False):
             continue
-        if not step.run(read_state()) and not step.optional:
-            if not confirm("This step is not finished. Continue with the next one?", default=True):
-                break
+        if (not step.run(read_state()) and not step.optional
+                and not confirm("This step is not finished. Continue with the next one?",
+                                default=True)):
+            break
 
     state = read_state()
     print()
@@ -1088,7 +1099,7 @@ def action_export_yt() -> None:
     print("Loading your YT Music playlists...")
     try:
         playlists = list_library_playlists(auth_file)
-    except Exception as e:
+    except API_ERRORS as e:
         warn(f"Could not load your playlists ({e}).")
         playlists = []
     playlists = [pl for pl in playlists if pl["id"] != "LM"]  # offered as L below
@@ -1169,7 +1180,7 @@ def action_import_yt() -> None:
     print("\nLoading your YT Music playlists...")
     try:
         own = [pl for pl in list_library_playlists(auth_file) if pl.get("owned") and pl["id"] != "LM"]
-    except Exception as e:
+    except API_ERRORS as e:
         warn(f"Could not load your playlists ({e}).")
         own = []
     print("Which YT Music playlist should receive the tracks?")

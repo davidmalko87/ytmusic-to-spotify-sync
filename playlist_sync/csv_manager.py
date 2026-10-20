@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from playlist_sync.config import ENRICHED_COLUMNS, ENRICHED_CSV, SKIPPED_CSV, UNMATCHED_CSV
+from playlist_sync.config import (
+    ENRICHED_COLUMNS,
+    ENRICHED_CSV,
+    SKIPPED_CSV,
+    UNMATCHED_CSV,
+)
 from playlist_sync.models import Track
 
 logger = logging.getLogger("playlist_sync")

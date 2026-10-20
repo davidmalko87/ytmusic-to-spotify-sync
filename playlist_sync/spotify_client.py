@@ -14,15 +14,15 @@ import shutil
 import time
 
 import spotipy
-from tqdm import tqdm
 from spotipy.oauth2 import SpotifyOAuth
+from tqdm import tqdm
 
 from playlist_sync.config import (
+    LEGACY_TOKEN_CACHE,
     SEARCH_DELAY_SEC,
     SPOTIFY_PLAYLIST_BATCH,
     SPOTIFY_SEARCH_LIMIT,
     SPOTIFY_TOKEN_CACHE,
-    LEGACY_TOKEN_CACHE,
     make_private,
 )
 

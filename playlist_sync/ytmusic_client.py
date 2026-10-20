@@ -7,6 +7,7 @@ Version: 0.1.0
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import re
@@ -18,7 +19,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ytmusicapi import YTMusic
 
-from playlist_sync.config import LIKES_SNAPSHOTS_DIR, SNAPSHOTS_DIR, ensure_dirs, make_private
+from playlist_sync.config import (
+    LIKES_SNAPSHOTS_DIR,
+    SNAPSHOTS_DIR,
+    ensure_dirs,
+    make_private,
+)
 from playlist_sync.models import Track
 
 logger = logging.getLogger("playlist_sync")
@@ -135,7 +141,7 @@ def _parse_curl(text: str) -> dict[str, str] | None:
         return None
 
     headers: dict[str, str] = {}
-    for flag, value in zip(tokens, tokens[1:]):
+    for flag, value in itertools.pairwise(tokens):
         if flag in ("-H", "--header") and ":" in value:
             key, _, val = value.partition(":")
             headers[key.strip().lower()] = val.strip()

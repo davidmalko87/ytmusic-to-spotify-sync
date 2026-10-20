@@ -235,7 +235,7 @@ def test_import_reads_bom_json_and_semicolon_csv(yt: FakeYT, home: Path) -> None
 
     excel = home / "excel.csv"
     excel.write_bytes("title;artist;trackId\nCaf\xe9;X;abcdefghijk\n".encode("cp1252"))
-    title, ids, without = yt_transfer.collect_source("auth", str(excel))
+    _, ids, without = yt_transfer.collect_source("auth", str(excel))
     assert ids == ["abcdefghijk"] and without == 0
 
 
