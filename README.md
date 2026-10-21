@@ -212,7 +212,8 @@ ytmusic-sync sync --limit 50               # match at most 50 new tracks this ru
 ytmusic-sync sync --retry-unmatched        # also retry tracks that previously failed
 ytmusic-sync sync --from-csv               # sync from SOURCE_CSV instead of the API
 ytmusic-sync sync --from-csv my_export.csv # sync from a specific CSV export
-ytmusic-sync import-csv --csv my_export.csv  # bootstrap local data from a CSV export
+ytmusic-sync import-csv --csv my_export.csv  # one-time bootstrap from a CSV export
+ytmusic-sync import-csv --csv my_export.csv --force  # replace existing sync data (archived first)
 ytmusic-sync retry-unmatched               # standalone retry of previously failed matches
 ytmusic-sync lastfm                        # Last.fm enrichment on the existing data
 ytmusic-sync lastfm --retry-missing        # also retry rows flagged attempted that still have no data
@@ -220,6 +221,8 @@ ytmusic-sync classify                      # re-derive primary_genre and mood fr
 ytmusic-sync classify --force              # re-classify rows that already have values
 ytmusic-sync sync-likes                    # mirror YT Music likes to Spotify Liked Songs
 ytmusic-sync sync-likes --dry-run          # preview likes-sync changes
+ytmusic-sync sync-likes --retry-unmatched  # also search again for likes that did not match
+ytmusic-sync sync-likes --force            # unsave even after a sudden mass drop (see below)
 ytmusic-sync export -o my_data.json        # copy of the enriched data as JSON, anywhere
 ytmusic-sync export-yt --playlist liked    # YT Music Liked Songs -> data/exports/*.json + .csv
 ytmusic-sync export-yt --playlist <ID-or-link>  # one YT Music playlist -> JSON + CSV
@@ -353,8 +356,10 @@ ytmusic-sync sync-likes
 Mirrors your YT Music **Liked Songs** to Spotify's **Liked Songs** library (`/me/tracks`). Uses the same 3-pass matcher and reuses Spotify URIs already discovered during regular playlist sync, so a track present in both places is matched only once. It needs the YT Music login and the Spotify app keys, but no Spotify playlist.
 
 Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state never collides with playlist-diff state. Outputs:
-- `data/likes_enriched.csv` — matched + unmatched likes with the same column schema
-- `data/likes_unmatched.csv` — likes that couldn't be matched
+- `data/likes_enriched.csv` (+ `.json`) — one row per current like, matched or not, so un-liking an old song is mirrored
+- `data/likes_unmatched.csv` — likes that couldn't be matched; a later playlist match is reused for free, and `--retry-unmatched` (or the menu's question) searches them again
+
+All your likes are fetched (no 10,000 cap). If a large share of them suddenly disappears from YT Music's answer — more than 50 and more than 20 % of the last run — nothing is unsaved: that is far more likely an incomplete answer than a real mass un-like. Run `sync-likes --force` (or answer yes in the menu) if you really un-liked them.
 
 ### Recreated the Spotify playlist? Use `repush`
 
