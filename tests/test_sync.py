@@ -20,7 +20,7 @@ from playlist_sync import cli
 from playlist_sync import config as cfg
 from playlist_sync.csv_manager import read_enriched_csv, write_enriched_csv
 from playlist_sync.models import MatchResult, Track
-from playlist_sync.spotify_client import RateLimitError
+from playlist_sync.spotify_client import RateLimitError, SearchUnavailable
 
 YT_ID = "PLd1XLAKnZQaXUPjf1khkyTNhg-KqHofWe"
 
@@ -40,6 +40,8 @@ class FakeWorld:
         self.match_calls = 0
         self.fail_on_match: int | None = None
         self.fail_with: BaseException | None = None
+        self.unavailable_on: set[int] = set()   # match calls whose search "fails"
+        self.push_error: BaseException | None = None
 
         (home / "browser.json").write_text("{}", encoding="utf-8")
         for key, value in (("SPOTIPY_CLIENT_ID", "a" * 32), ("SPOTIPY_CLIENT_SECRET", "b" * 32),
@@ -65,10 +67,14 @@ class FakeWorld:
         self.match_calls += 1
         if self.fail_on_match is not None and self.match_calls == self.fail_on_match:
             raise self.fail_with  # type: ignore[misc]
+        if self.match_calls in self.unavailable_on:
+            raise SearchUnavailable("HTTP 503")
         return MatchResult(source_track=track, spotify_uri=f"spotify:track:{track.track_id}",
                            method="isrc", confidence=1.0)
 
     def _add(self, sp: object, pid: str, uris: list[str], dry_run: bool = False) -> int:
+        if self.push_error is not None:
+            raise self.push_error
         if not dry_run:
             self.playlist += uris
         return len(uris)
@@ -159,3 +165,35 @@ def test_limited_runs_keep_lastfm_data_of_unsearched_rows(world: FakeWorld) -> N
     assert len(kept) == 5
     assert all(t.lastfm_listeners == 1234 for t in kept)
     assert len(world.playlist) == 2
+
+
+def test_failed_search_leaves_the_track_for_the_next_run(world: FakeWorld) -> None:
+    world.unavailable_on = {2}  # song 2's search fails once
+    sync()
+    rows = {t.track_id: t for t in read_enriched_csv()}
+    assert not rows["vid00000002"].match_attempted  # not written off as "no match"
+    assert len(world.playlist) == 4
+    sync()
+    assert "spotify:track:vid00000002" in world.playlist
+
+
+def test_five_failed_searches_in_a_row_stop_with_progress_saved(world: FakeWorld) -> None:
+    world.unavailable_on = {1, 2, 3, 4, 5}  # every search in the run fails
+    sync()
+    assert world.playlist == []  # stopped like a rate limit: no push while Spotify is down
+    assert len(read_enriched_csv()) == 5
+    world.unavailable_on = set()
+    sync()
+    assert len(world.playlist) == 5 and len(set(world.playlist)) == 5
+
+
+def test_rate_limited_push_loses_nothing(world: FakeWorld) -> None:
+    world.push_error = RateLimitError(7200)
+    sync()
+    assert world.playlist == []
+    assert cfg.MATCH_CACHE.exists()  # matches kept as unpushed
+    world.push_error = None
+    calls_before = world.match_calls
+    sync()
+    assert len(world.playlist) == 5
+    assert world.match_calls == calls_before  # pushed from the cache, nothing searched again

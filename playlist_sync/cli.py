@@ -8,9 +8,11 @@ Version: 0.8.0
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
+import requests
 from tqdm import tqdm
 
 from playlist_sync.config import (
@@ -58,6 +60,7 @@ from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
 from playlist_sync.spotify_client import (
     RateLimitError,
+    SearchUnavailable,
     add_saved_tracks,
     add_tracks_to_playlist,
     get_playlist_tracks,
@@ -76,6 +79,9 @@ from playlist_sync.ytmusic_client import (
     save_likes_snapshot,
     save_snapshot,
 )
+
+logger = logging.getLogger("playlist_sync")
+
 
 # ── Debug stats writer ──────────────────────────────────────────────
 
@@ -209,6 +215,18 @@ def _push_and_mark(sp: object, config: dict[str, str], uris: list[str],
         if entry.get("spotify_uri") in pushed:
             entry["pushed"] = True
     return True
+
+
+def _remove_deleted(sp: object, config: dict[str, str], diff: object,
+                    existing_map: dict[str, Track], dry_run: bool) -> None:
+    """Remove from the Spotify playlist the tracks deleted on YT Music since the last run."""
+    remove_uris = [existing_map[t.fingerprint].spotify_uri for t in diff.removed
+                   if t.fingerprint in existing_map and existing_map[t.fingerprint].spotify_uri]
+    if remove_uris:
+        removed = remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], remove_uris,
+                                              dry_run=dry_run)
+        action = "[DRY RUN] Would remove" if dry_run else "Removed"
+        print(f"{action} {removed} tracks from Spotify playlist")
 
 
 def _clear_match_cache() -> None:
@@ -537,8 +555,19 @@ def cmd_sync(args: argparse.Namespace) -> None:
             print(f"\nMatching {len(to_search)} tracks to Spotify...")
 
             try:
+                failures_in_a_row = 0
                 for track in tqdm(to_search, desc="Matching", unit="track"):
-                    result = match_track(sp, track)
+                    try:
+                        result = match_track(sp, track)
+                    except SearchUnavailable as e:
+                        # Not searched: leave match_attempted unset so the next
+                        # run tries it again; give up after a few in a row
+                        failures_in_a_row += 1
+                        logger.warning("Search failed for '%s': %s", track.title, e)
+                        if failures_in_a_row >= 5:
+                            raise
+                        continue
+                    failures_in_a_row = 0
                     fp = track.fingerprint
                     # Mark attempted regardless of outcome — failures go in
                     # unmatched.csv and won't be re-tried automatically next
@@ -572,13 +601,17 @@ def cmd_sync(args: argparse.Namespace) -> None:
                     if not args.dry_run and len(match_cache) % 25 == 0:
                         _save_match_cache(match_cache)
 
-            except (RateLimitError, KeyboardInterrupt) as e:
+            except (RateLimitError, KeyboardInterrupt, SearchUnavailable) as e:
                 matched_so_far = len(matched_results)
                 searched = sum(1 for t in to_search if t.match_attempted)
                 if isinstance(e, RateLimitError):
                     hrs = e.retry_after / 3600
                     print(f"\n\nRate limited by Spotify! Progress saved ({matched_so_far} matched).")
                     print(f"Wait ~{hrs:.1f}h, then sync again: {cli_command()} sync")
+                elif isinstance(e, SearchUnavailable):
+                    print(f"\n\nSpotify is not answering searches ({e}). "
+                          f"Progress saved ({matched_so_far} matched).")
+                    print(f"Sync again later to continue: {cli_command()} sync")
                 else:
                     print(f"\n\nStopped. Progress saved ({matched_so_far} matched).")
                     print(f"Sync again any time to continue: {cli_command()} sync")
@@ -609,23 +642,21 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
         print(f"Matched: {len(matched_results)}, Unmatched: {len(unmatched_tracks)}")
 
-    # Step 6: Push to Spotify (plus cached matches an interrupted run never pushed)
-    new_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
-        [r.spotify_uri for r in matched_results]
-    fully_pushed = _push_and_mark(sp, config, new_uris, match_cache, args.dry_run)
-
-    if diff.removed:
-        remove_uris = []
-        for t in diff.removed:
-            fp = t.fingerprint
-            if fp in existing_map and existing_map[fp].spotify_uri:
-                remove_uris.append(existing_map[fp].spotify_uri)
-        if remove_uris:
-            removed = remove_tracks_from_playlist(
-                sp, config["SPOTIFY_PLAYLIST_ID"], remove_uris, dry_run=args.dry_run,
-            )
-            action = "[DRY RUN] Would remove" if args.dry_run else "Removed"
-            print(f"{action} {removed} tracks from Spotify playlist")
+    # Step 6: Push to Spotify (plus cached matches an interrupted run never pushed).
+    # A long rate limit or a dropped connection here must not lose the matches:
+    # keep them in the cache as unpushed and the old snapshot for the removals.
+    try:
+        new_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
+            [r.spotify_uri for r in matched_results]
+        fully_pushed = _push_and_mark(sp, config, new_uris, match_cache, args.dry_run)
+        _remove_deleted(sp, config, diff, existing_map, args.dry_run)
+    except (RateLimitError, requests.exceptions.RequestException) as e:
+        print(f"\nSpotify stopped accepting changes ({e}). Nothing is lost: the next sync "
+              "adds the matched tracks and applies the removals.")
+        if not args.dry_run:
+            _save_match_cache(match_cache)
+            write_enriched_csv(rows_to_keep(include_removed=True))
+        return
 
     # Step 8: Backfill Spotify metadata, genres, and audio features
     if already_matched and not args.dry_run:
@@ -1207,6 +1238,9 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
                     unmatched_likes.append(track)
         except RateLimitError as e:
             print(f"Rate limited. Wait ~{e.retry_after / 3600:.1f}h and re-run.")
+            return
+        except SearchUnavailable as e:
+            print(f"Spotify is not answering searches ({e}). Nothing was changed; re-run later.")
             return
 
     # Step 6: push to Spotify saved tracks

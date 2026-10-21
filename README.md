@@ -486,7 +486,7 @@ reading `your_..._here` from the template count as not set.
 - Python **3.10+**
 - Spotify account with **Premium** for the developer app ([dashboard](https://developer.spotify.com/dashboard)); not needed for the YT Music backup features
 - YouTube Music account
-- [`pandas`](https://pypi.org/project/pandas/) >= 2.0, [`spotipy`](https://pypi.org/project/spotipy/) >= 2.24,
+- [`pandas`](https://pypi.org/project/pandas/) >= 2.0, [`spotipy`](https://pypi.org/project/spotipy/) >= 2.26,
   [`ytmusicapi`](https://pypi.org/project/ytmusicapi/) >= 1.8,
   [`python-dotenv`](https://pypi.org/project/python-dotenv/) >= 1.2.3, [`tqdm`](https://pypi.org/project/tqdm/) >= 4.66
 

@@ -13,9 +13,12 @@ import math
 import shutil
 import time
 
+import requests
 import spotipy
+from requests.adapters import HTTPAdapter
 from spotipy.oauth2 import SpotifyOAuth
 from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 from playlist_sync.config import (
     LEGACY_TOKEN_CACHE,
@@ -43,6 +46,29 @@ def _adopt_legacy_token_cache() -> None:
         logger.info("Copied Spotify token cache %s -> %s", LEGACY_TOKEN_CACHE, SPOTIFY_TOKEN_CACHE)
 
 
+def _spotify_session() -> requests.Session:
+    """HTTP session that retries server errors but hands every 429 straight back.
+
+    spotipy's own session lets urllib3 honour Retry-After on a 429 by itself:
+    it sleeps up to 6 hours per retry, three times, then reports the 429
+    without its headers, so a long Spotify ban hung the sync for hours. With
+    respect_retry_after_header=False (status_forcelist alone is not enough -
+    urllib3 retries any 429 that carries Retry-After) the tool sees the real
+    wait and either sleeps a short one or stops with progress saved.
+    """
+    retry = Retry(
+        total=3, connect=None, read=False, status=3, backoff_factor=0.3,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE"]),
+        respect_retry_after_header=False,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
     """Create an authenticated Spotify client.
 
@@ -65,7 +91,9 @@ def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
         # Pin the token cache to the settings folder; spotipy's default is the CWD
         cache_path=str(SPOTIFY_TOKEN_CACHE),
     )
-    sp = spotipy.Spotify(auth_manager=auth_manager, requests_timeout=30, retries=3)
+    sp = spotipy.Spotify(
+        auth_manager=auth_manager, requests_session=_spotify_session(), requests_timeout=30,
+    )
 
     user = sp.current_user()
     logger.info("Authenticated as Spotify user: %s", user.get("display_name", user["id"]))
@@ -117,6 +145,10 @@ def get_playlist_access(sp: spotipy.Spotify, playlist_id: str) -> dict[str, obje
     }
 
 
+class SearchUnavailable(Exception):
+    """Spotify did not answer a search (server error, network); not the same as no results."""
+
+
 class RateLimitError(Exception):
     """Raised when Spotify rate limit is hit and retry wait is too long."""
     def __init__(self, retry_after: int):
@@ -124,9 +156,22 @@ class RateLimitError(Exception):
         super().__init__(f"Rate limited. Retry after {retry_after}s")
 
 
+def _retry_after_seconds(e: spotipy.SpotifyException) -> int:
+    """Seconds Spotify asked us to wait (60 when the header is missing or odd)."""
+    try:
+        return max(0, int(float((e.headers or {}).get("Retry-After", 60))))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _is_real_rate_limit(e: spotipy.SpotifyException) -> bool:
+    """A genuine 429 carries Retry-After; spotipy's own 'Max Retries' 429 has no headers."""
+    return e.http_status == 429 and bool(e.headers)
+
+
 def _handle_rate_limit(e: spotipy.SpotifyException) -> None:
     """Handle 429 rate limit errors with short backoff or raise if too long."""
-    retry_after = int(e.headers.get("Retry-After", 60)) if e.headers else 60
+    retry_after = _retry_after_seconds(e)
 
     if retry_after <= 120:
         # Manageable wait — just pause and retry
@@ -148,20 +193,29 @@ def search_track(
 
     time.sleep(SEARCH_DELAY_SEC)
 
-    for attempt in range(3):
+    last_wait = 60
+    for _attempt in range(3):
         try:
             results = sp.search(q=query, type="track", limit=limit)
             items = results.get("tracks", {}).get("items", [])
             logger.debug("Search '%s' -> %d results", query[:60], len(items))
             return items
         except spotipy.SpotifyException as e:
-            if e.http_status == 429:
-                _handle_rate_limit(e)
+            if _is_real_rate_limit(e):
+                _handle_rate_limit(e)  # sleeps a short wait, raises RateLimitError for a long one
+                last_wait = _retry_after_seconds(e)
                 continue
+            if e.http_status == 429 or e.http_status >= 500:
+                # Server errors after urllib3's retries: the search did not happen,
+                # so the track must not be recorded as "no match"
+                raise SearchUnavailable(f"Spotify search failed (HTTP {e.http_status})") from e
             logger.warning("Spotify search failed for '%s': %s", query[:60], e)
             return []
+        except requests.exceptions.RequestException as e:  # timeouts, DNS, resets
+            raise SearchUnavailable(f"could not reach Spotify ({e})") from e
 
-    return []
+    # Still rate-limited after three short waits: stop like a long ban, progress kept
+    raise RateLimitError(last_wait)
 
 
 def search_by_isrc(sp: spotipy.Spotify, isrc: str) -> list[dict]:
@@ -340,6 +394,25 @@ def get_audio_features_batch(
     return features
 
 
+def _with_rate_limit_retry(call, what: str) -> bool:
+    """Run one playlist write; wait out short 429s, raise RateLimitError for long ones.
+
+    Returns False (and logs) when Spotify refuses the write for another reason.
+    """
+    for _attempt in range(3):
+        try:
+            call()
+            return True
+        except spotipy.SpotifyException as e:
+            if _is_real_rate_limit(e):
+                _handle_rate_limit(e)
+                continue
+            logger.error("Failed to %s: %s", what, e)
+            return False
+    logger.error("Failed to %s: still rate-limited after 3 waits", what)
+    return False
+
+
 def add_tracks_to_playlist(
     sp: spotipy.Spotify,
     playlist_id: str,
@@ -357,12 +430,10 @@ def add_tracks_to_playlist(
     added = 0
     for i in range(0, len(uris), SPOTIFY_PLAYLIST_BATCH):
         batch = uris[i:i + SPOTIFY_PLAYLIST_BATCH]
-        try:
-            sp.playlist_add_items(playlist_id, batch)
+        if _with_rate_limit_retry(lambda b=batch: sp.playlist_add_items(playlist_id, b),
+                                  f"add batch at offset {i}"):
             added += len(batch)
             logger.debug("Added batch of %d tracks (%d/%d)", len(batch), added, len(uris))
-        except spotipy.SpotifyException as e:
-            logger.error("Failed to add batch at offset %d: %s", i, e)
 
     logger.info("Added %d/%d tracks to Spotify playlist", added, len(uris))
     return added
@@ -385,12 +456,12 @@ def remove_tracks_from_playlist(
     removed = 0
     for i in range(0, len(uris), SPOTIFY_PLAYLIST_BATCH):
         batch = uris[i:i + SPOTIFY_PLAYLIST_BATCH]
-        try:
-            sp.playlist_remove_all_occurrences_of_items(playlist_id, batch)
+        if _with_rate_limit_retry(
+            lambda b=batch: sp.playlist_remove_all_occurrences_of_items(playlist_id, b),
+            f"remove batch at offset {i}",
+        ):
             removed += len(batch)
             logger.debug("Removed batch of %d tracks (%d/%d)", len(batch), removed, len(uris))
-        except spotipy.SpotifyException as e:
-            logger.error("Failed to remove batch at offset %d: %s", i, e)
 
     logger.info("Removed %d/%d tracks from Spotify playlist", removed, len(uris))
     return removed
