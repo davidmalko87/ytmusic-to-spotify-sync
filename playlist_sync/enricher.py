@@ -1,8 +1,8 @@
 """
 Spotify metadata and audio features enrichment for matched tracks.
 Author: David
-Date: 2026-03-22
-Version: 0.4.0
+Date: 2026-10-18
+Version: 0.5.0
 
 Enriches tracks with Spotify metadata (ISRC, release date, explicit,
 popularity, artist genres), audio features (danceability, energy, etc.),
@@ -16,6 +16,7 @@ artists are not retried on every sync run.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 import spotipy
@@ -38,11 +39,12 @@ logger = logging.getLogger("playlist_sync")
 #
 # These maps bucket the 700+ unique tags Last.fm uses into a smaller,
 # usable set. Order matters: the first bucket whose keywords match wins
-# `primary_genre`. Mood detection scans for any keyword and joins all
-# matches.
+# `primary_genre` (with one rank guard for punk, see _pick_genre). Mood
+# detection scans for any keyword and joins all matches.
 #
-# Keywords are matched as substrings against lower-cased tags (e.g.
-# "deep house" matches the "electronic" bucket via "house").
+# Keywords match lower-cased tags as a whole tag or as a word inside one
+# (e.g. "deep house" matches the "electronic" bucket via "house"), never as
+# a substring, which produced false hits like "post-rock" -> "ost".
 
 GENRE_BUCKETS: list[tuple[str, set[str]]] = [
     # More specific buckets first so they win over broader fallbacks.
@@ -54,7 +56,9 @@ GENRE_BUCKETS: list[tuple[str, set[str]]] = [
     ("jazz", {"jazz", "swing", "bebop", "neo-swing", "smooth jazz", "fusion"}),
     ("hip hop", {"hip hop", "hip-hop", "rap", "trap", "boom bap", "gangsta rap"}),
     ("metal", {"metal", "heavy metal", "death metal", "black metal", "metalcore", "doom metal", "thrash metal", "nu metal"}),
-    ("punk", {"punk", "punk rock", "post-punk", "hardcore", "pop punk"}),
+    # No bare "hardcore": on Last.fm it tags hardcore techno as often as
+    # hardcore punk. Post-punk is rock (SadSvit, Кино), see the rock bucket.
+    ("punk", {"punk", "punk rock", "pop punk", "hardcore punk", "post-hardcore"}),
     ("country", {"country", "americana", "bluegrass"}),
     ("blues", {"blues", "delta blues", "rhythm and blues"}),
     ("reggae", {"reggae", "ska", "dub", "dancehall"}),
@@ -67,12 +71,14 @@ GENRE_BUCKETS: list[tuple[str, set[str]]] = [
         "synthwave", "synth", "synthpop", "vaporwave", "chillwave",
         "downtempo", "trip-hop", "trip hop", "idm",
         "dance", "club",
+        "happy hardcore", "hardstyle", "gabber", "speedcore",
     }),
     ("ambient", {"ambient", "drone", "dark ambient", "new age", "atmospheric"}),
     ("rock", {
         "rock", "alternative rock", "indie rock", "classic rock",
         "hard rock", "soft rock", "psychedelic rock", "progressive rock",
         "post-rock", "shoegaze", "grunge", "garage rock",
+        "post-punk", "post-punk revival",
     }),
     ("pop", {"pop", "indie pop", "synthpop", "electropop", "dream pop", "k-pop", "j-pop", "art pop"}),
     ("rnb", {"rnb", "r&b", "soul", "neo-soul", "contemporary r&b"}),
@@ -80,22 +86,51 @@ GENRE_BUCKETS: list[tuple[str, set[str]]] = [
     ("world", {"world", "world music", "latin", "afrobeat", "balkan"}),
 ]
 
-# Mood keyword → display label. Substring matched against full tag pool.
+# Buckets that never push a punk tag aside: rock is punk's parent genre and
+# indie is the generic fallback. Any other genre that outranks every punk
+# tag wins instead (see _pick_genre).
+_PUNK_ALLIES = {"punk", "rock", "indie"}
+
+# Mood keyword → display label. Whole-tag or word match against the tag pool.
 MOOD_KEYWORDS: dict[str, list[str]] = {
-    "chill":       ["chill", "chillout", "chillstep", "lounge", "easy listening", "relaxing", "calm", "mellow", "soothing"],
+    "chill":       ["chill", "chillout", "chillstep", "lounge", "easy listening", "relaxing", "calm", "mellow", "soothing",
+                    "peaceful", "gentle", "laid back", "laid-back", "lullaby"],
     "energetic":   ["energetic", "upbeat", "uplifting", "party", "high energy", "powerful"],
     "dark":        ["dark", "haunting", "sinister", "ominous"],
-    "sad":         ["sad", "melancholic", "melancholy", "depressing", "sorrowful", "mournful"],
+    "sad":         ["sad", "melancholic", "melancholy", "depressing", "sorrowful", "mournful", "sadcore"],
     "happy":       ["happy", "cheerful", "joyful", "feel good"],
     "epic":        ["epic", "heroic", "triumphant"],
     "romantic":    ["romantic", "love song", "sentimental"],
-    "dreamy":      ["dreamy", "ethereal", "atmospheric"],
+    "dreamy":      ["dreamy", "ethereal", "atmospheric", "dream pop", "dreampop"],
     "aggressive":  ["aggressive", "intense", "brutal", "heavy"],
     "nostalgic":   ["nostalgic", "nostalgia", "retro"],
     "cinematic":   ["cinematic", "epic score", "orchestral"],
     "ambient":     ["ambient"],   # also a genre — useful as a mood marker
     "instrumental":["instrumental"],
+    # Same kind of marker, for folk acts (Daughter, Agnes Obel, Pomme) whose
+    # top tags carry no mood word. "singer-songwriter" stays out: on Last.fm
+    # it also tags soul and pop singers (Adele, John Legend).
+    "acoustic":    ["acoustic", "unplugged", "indie folk", "chamber folk", "folk"],
 }
+
+# Mood keywords that only count as a complete tag, never as a word inside
+# one: "folk" also appears in "folk metal" and "folk punk".
+MOOD_WHOLE_TAG_ONLY = {"folk"}
+
+
+def _tag_words(tag: str) -> set[str]:
+    """Words of one lower-cased tag: "post-rock" -> {"post", "rock"}."""
+    return {w for w in tag.replace("-", " ").replace("/", " ").split() if w}
+
+
+def _ordered_tags(raw_pool: str) -> list[str]:
+    """Lower-cased tags in pool order (Last.fm ranks the strongest first), deduplicated."""
+    tags: list[str] = []
+    for tag in raw_pool.lower().split(","):
+        t = tag.strip()
+        if t and t not in tags:
+            tags.append(t)
+    return tags
 
 
 def _tokenize_tags(raw_pool: str) -> tuple[set[str], set[str]]:
@@ -111,34 +146,119 @@ def _tokenize_tags(raw_pool: str) -> tuple[set[str], set[str]]:
     bucket keywords ("house") without resorting to substring matching,
     which produced false hits like "post-rock" -> "ost".
     """
-    raw_pool = raw_pool.lower()
-    tag_set: set[str] = set()
+    tag_set = set(_ordered_tags(raw_pool))
     token_set: set[str] = set()
-    for tag in raw_pool.split(","):
-        t = tag.strip()
-        if not t:
-            continue
-        tag_set.add(t)
-        for word in t.replace("-", " ").replace("/", " ").split():
-            w = word.strip()
-            if w:
-                token_set.add(w)
+    for tag in tag_set:
+        token_set |= _tag_words(tag)
     return tag_set, token_set
 
 
-def _bucket_matches(tag_set: set[str], token_set: set[str], keywords: set[str]) -> bool:
-    """True if any keyword appears as a whole tag OR as a word in any tag."""
-    return bool(tag_set & keywords) or bool(token_set & keywords)
+def _bucket_matches(
+    tag_set: set[str],
+    token_set: set[str],
+    keywords: set[str],
+    whole_tag_only: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    """True if any keyword appears as a whole tag OR as a word in any tag.
+
+    Keywords in `whole_tag_only` only count as a whole tag.
+    """
+    return bool(tag_set & keywords) or bool(token_set & (keywords - whole_tag_only))
 
 
-def classify_track(track: Track) -> Track:
+def _genre_ranks(tags: list[str]) -> dict[str, int]:
+    """Map every genre bucket the tags hit to the rank of its strongest tag.
+
+    A tag that is itself a bucket keyword counts for that bucket only:
+    "post-punk" is rock and must not also hit punk through the word "punk".
+    Any other tag hits every bucket that one of its words names.
+    """
+    ranks: dict[str, int] = {}
+    for rank, tag in enumerate(tags):
+        labels = [label for label, keywords in GENRE_BUCKETS if tag in keywords]
+        if not labels:
+            words = _tag_words(tag)
+            labels = [label for label, keywords in GENRE_BUCKETS if words & keywords]
+        for label in labels:
+            ranks.setdefault(label, rank)
+    return ranks
+
+
+def _pick_genre(tags: list[str]) -> str:
+    """First GENRE_BUCKETS entry the tags hit, with a rank guard for punk.
+
+    Last.fm users hang "punk" on plenty of electronic acts, so a punk tag
+    decides only when no tag of an unrelated genre ranks above it:
+    Thylacine's "electronic, french, punk, ..." is electronic.
+    """
+    ranks = _genre_ranks(tags)
+    for label, _keywords in GENRE_BUCKETS:
+        if label not in ranks:
+            continue
+        if label == "punk" and any(
+            rank < ranks["punk"] for other, rank in ranks.items() if other not in _PUNK_ALLIES
+        ):
+            continue
+        return label
+    return ""
+
+
+# ── YouTube channel uploads ──────────────────────────────────────────
+#
+# A YT Music track without an album is usually a plain YouTube upload, and
+# its "artist" is the channel that uploaded it. artist.getInfo for that
+# name returns whoever else is called that on Last.fm: the channel
+# "Arrakis" got a metal band's tags, "Electronic Arts" got jazz.
+
+
+def _first_artist(artist: str) -> str:
+    """Primary artist of a comma-joined artist string."""
+    return artist.split(",")[0].strip()
+
+
+def _is_channel_upload(track: Track) -> bool:
+    """True for a YT Music track with no album (a plain YouTube upload)."""
+    return track.skip_reason == "no_album" or (
+        track.platform == "ytmusic" and not track.album.strip()
+    )
+
+
+def _album_artists(tracks: list[Track]) -> set[str]:
+    """Casefolded primary artists that have at least one track with an album."""
+    return {
+        _first_artist(t.artist).casefold()
+        for t in tracks
+        if t.artist and t.album.strip() and not _is_channel_upload(t)
+    }
+
+
+def _artist_is_trusted(track: Track, album_artists: set[str]) -> bool:
+    """False when the track's artist is probably just the uploading channel.
+
+    A channel upload keeps its artist when that artist also has album tracks
+    in the library (sanah) or the title names them ("Guru Josh - Infinity
+    2012"). Otherwise its artist tags would describe a namesake.
+    """
+    if not _is_channel_upload(track):
+        return True
+    name = _first_artist(track.artist).casefold()
+    if not name:
+        return False
+    if name in album_artists:
+        return True
+    return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", track.title.casefold()) is not None
+
+
+def classify_track(track: Track, use_artist_tags: bool = True) -> Track:
     """Compute primary_genre and mood from existing tag pool.
 
     Pure function — no API calls. Safe to run on every track on every
     sync. Sources tags from both `artist_tags` (denser) and `lastfm_tags`
     (track-level, sparser but sometimes has mood markers).
+    use_artist_tags=False leaves `artist_tags` out of the pool: for channel
+    uploads they belong to a namesake of the channel.
     """
-    raw_pool = track.artist_tags + "," + track.lastfm_tags
+    raw_pool = (track.artist_tags + "," if use_artist_tags else "") + track.lastfm_tags
     tag_set, token_set = _tokenize_tags(raw_pool)
 
     if not tag_set:
@@ -146,17 +266,14 @@ def classify_track(track: Track) -> Track:
 
     # primary_genre: first matching bucket wins (buckets ordered by specificity)
     if not track.primary_genre:
-        for genre_label, keywords in GENRE_BUCKETS:
-            if _bucket_matches(tag_set, token_set, keywords):
-                track.primary_genre = genre_label
-                break
+        track.primary_genre = _pick_genre(_ordered_tags(raw_pool))
 
     # mood: collect all matching mood labels (multi-mood is fine)
     if not track.mood:
         moods: list[str] = []
         for mood_label, keywords in MOOD_KEYWORDS.items():
             kw_set = set(keywords)
-            if _bucket_matches(tag_set, token_set, kw_set):
+            if _bucket_matches(tag_set, token_set, kw_set, MOOD_WHOLE_TAG_ONLY):
                 moods.append(mood_label)
         track.mood = ", ".join(moods)
 
@@ -165,11 +282,12 @@ def classify_track(track: Track) -> Track:
 
 def classify_all_tracks(tracks: list[Track]) -> int:
     """Run classifier on every track. Returns count classified."""
+    album_artists = _album_artists(tracks)
     classified = 0
     for t in tracks:
         before_g = t.primary_genre
         before_m = t.mood
-        classify_track(t)
+        classify_track(t, use_artist_tags=_artist_is_trusted(t, album_artists))
         if t.primary_genre != before_g or t.mood != before_m:
             classified += 1
     logger.info("Classified %d/%d tracks (genre + mood)", classified, len(tracks))
@@ -249,11 +367,14 @@ def backfill_track_metadata(
             track_id_map[sp_id] = t
 
     logger.info("Backfilling Spotify metadata for %d tracks...", len(track_id_map))
-    sp_tracks = get_tracks_batch(sp, list(track_id_map.keys()))
+    not_fetched: set[str] = set()
+    sp_tracks = get_tracks_batch(sp, list(track_id_map.keys()), failed=not_fetched)
 
-    # Mark all attempted so we skip them on future runs even if /tracks 403'd
+    # Mark attempted so we skip them on future runs even if /tracks 403'd; a
+    # batch lost to server trouble is left for the next run
     for t in needs_backfill:
-        t.spotify_metadata_attempted = True
+        if t.spotify_uri.split(":")[-1] not in not_fetched:
+            t.spotify_metadata_attempted = True
 
     enriched_count = 0
     for sp_id, sp_data in sp_tracks.items():
@@ -298,10 +419,6 @@ def backfill_artist_genres(
         logger.info("All matched tracks already have artist genres or were attempted")
         return tracks
 
-    # Mark attempted up-front so a 403 lockout doesn't re-trigger next run
-    for t in needs_genres:
-        t.spotify_genres_attempted = True
-
     # We need artist IDs — get them from the track URIs via /tracks endpoint.
     # Build a map of spotify_track_id -> list of Track objects (for fan-out).
     track_id_to_tracks: dict[str, list[Track]] = {}
@@ -311,7 +428,8 @@ def backfill_artist_genres(
             track_id_to_tracks.setdefault(sp_id, []).append(t)
 
     logger.info("Fetching track data for %d tracks to extract artist IDs...", len(track_id_to_tracks))
-    sp_tracks = get_tracks_batch(sp, list(track_id_to_tracks.keys()))
+    tracks_not_fetched: set[str] = set()
+    sp_tracks = get_tracks_batch(sp, list(track_id_to_tracks.keys()), failed=tracks_not_fetched)
 
     # Collect unique artist IDs and map artist_id -> set of Tracks
     artist_id_to_tracks: dict[str, list[Track]] = {}
@@ -324,12 +442,22 @@ def backfill_artist_genres(
                 for t in track_id_to_tracks[sp_id]:
                     artist_id_to_tracks.setdefault(primary_artist_id, []).append(t)
 
-    if not artist_id_to_tracks:
+    artists_not_fetched: set[str] = set()
+    if artist_id_to_tracks:
+        logger.info("Fetching genres for %d unique artists...", len(artist_id_to_tracks))
+        artist_data = get_artists_batch(sp, list(artist_id_to_tracks.keys()),
+                                        failed=artists_not_fetched)
+    else:
         logger.info("No artist IDs found to fetch genres")
-        return tracks
+        artist_data = {}
 
-    logger.info("Fetching genres for %d unique artists...", len(artist_id_to_tracks))
-    artist_data = get_artists_batch(sp, list(artist_id_to_tracks.keys()))
+    # Attempted means Spotify answered (data, nothing, or a 403 lockout); a
+    # lookup lost to server trouble is left for the next run
+    retry_later = {id(t) for sp_id in tracks_not_fetched for t in track_id_to_tracks[sp_id]}
+    retry_later |= {id(t) for a in artists_not_fetched for t in artist_id_to_tracks[a]}
+    for t in needs_genres:
+        if id(t) not in retry_later:
+            t.spotify_genres_attempted = True
 
     enriched_count = 0
     for artist_id, artist_info in artist_data.items():
@@ -383,58 +511,116 @@ def enrich_with_audio_features(
     return tracks
 
 
+def lastfm_track_candidates(
+    tracks: list[Track], ignore_attempted: bool = False,
+) -> list[Track]:
+    """Tracks that still need track.getInfo data (playcount, listeners, track tags).
+
+    ignore_attempted=True also returns tracks flagged lastfm_track_attempted
+    that still have no playcount (`lastfm --retry-missing`): versions before
+    0.8.0 set that flag on failed requests and on duplicate rows.
+    """
+    # Skip tracks Last.fm already answered for, even with "not found".
+    # Without this, the ~5% of tracks that genuinely don't exist on Last.fm
+    # get re-queried on every sync run forever.
+    return [
+        t for t in tracks
+        if not t.lastfm_playcount and t.title and t.artist
+        and (ignore_attempted or not t.lastfm_track_attempted)
+    ]
+
+
+def _wants_artist_tags(track: Track, ignore_attempted: bool = False) -> bool:
+    """True if artist.getInfo has not been answered for this track yet."""
+    return (
+        not track.artist_tags and bool(track.artist)
+        and (ignore_attempted or not track.lastfm_attempted)
+    )
+
+
+def lastfm_artist_tag_candidates(
+    tracks: list[Track], ignore_attempted: bool = False,
+) -> list[Track]:
+    """Tracks that still need artist.getInfo tags.
+
+    Channel uploads whose artist is just the channel name are left out
+    (see _artist_is_trusted): their lookup would return a namesake's tags.
+    ignore_attempted=True also returns tracks flagged lastfm_attempted that
+    still have no artist tags; the channel-upload rule applies either way.
+    """
+    album_artists = _album_artists(tracks)
+    return [
+        t for t in tracks
+        if _wants_artist_tags(t, ignore_attempted) and _artist_is_trusted(t, album_artists)
+    ]
+
+
+def _apply_lastfm_track_info(track: Track, info: dict) -> None:
+    """Copy track.getInfo results onto a track without replacing known values with nothing."""
+    track.lastfm_playcount = info.get("playcount") or track.lastfm_playcount
+    track.lastfm_listeners = info.get("listeners") or track.lastfm_listeners
+    tags = info.get("tags") or []
+    if tags:
+        track.lastfm_tags = ", ".join(tags[:5])
+
+
 def backfill_lastfm_data(
     api_key: str,
     tracks: list[Track],
+    ignore_attempted: bool = False,
 ) -> list[Track]:
     """Fetch and apply Last.fm play counts, listeners, and tags.
 
     Uses artist + track name matching (no Spotify IDs needed).
-    Only fetches for tracks that don't already have Last.fm data.
+    Only fetches for tracks that don't already have Last.fm data. A track
+    is marked attempted once Last.fm answered for it (found or not found);
+    a failed request leaves it unmarked so the next run retries it.
+    ignore_attempted=True re-checks flagged tracks that still have no data.
     """
-    # Skip tracks we've already tried via track.getInfo, even if they returned
-    # nothing. Without this, the ~5% of tracks that genuinely don't exist on
-    # Last.fm get re-queried on every sync run forever.
-    needs_lastfm = [
-        t for t in tracks
-        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
-    ]
+    needs_lastfm = lastfm_track_candidates(tracks, ignore_attempted)
 
     if not needs_lastfm:
         logger.info("All tracks already have Last.fm data or were attempted")
         return tracks
 
-    # Build lookup pairs
-    lookup_pairs = [(t.artist, t.title) for t in needs_lastfm]
-    pair_to_tracks: dict[tuple[str, str], Track] = {
-        (t.artist, t.title): t for t in needs_lastfm
-    }
+    if ignore_attempted:
+        # The old flag may come from a failed request; only this run's
+        # answer decides it now, so a failed retry is retried next run.
+        for t in needs_lastfm:
+            t.lastfm_track_attempted = False
 
-    logger.info("Fetching Last.fm data for %d tracks...", len(lookup_pairs))
-    results = get_tracks_info_batch(api_key, lookup_pairs)
+    # A playlist can hold the same song more than once (re-uploads, re-adds),
+    # so one lookup fans out to every track with that artist + title.
+    pair_to_tracks: dict[tuple[str, str], list[Track]] = {}
+    for t in needs_lastfm:
+        pair_to_tracks.setdefault((t.artist, t.title), []).append(t)
+
+    logger.info(
+        "Fetching Last.fm data for %d tracks (%d unique artist + title pairs)...",
+        len(needs_lastfm), len(pair_to_tracks),
+    )
+    results = get_tracks_info_batch(api_key, list(pair_to_tracks))
 
     enriched_count = 0
-    for (artist, title), info in results.items():
-        key = (artist, title)
-        if key in pair_to_tracks:
-            t = pair_to_tracks[key]
-            t.lastfm_playcount = info.get("playcount", 0)
-            t.lastfm_listeners = info.get("listeners", 0)
-            tags = info.get("tags", [])
-            t.lastfm_tags = ", ".join(tags[:5]) if tags else ""
-            enriched_count += 1
+    for key, info in results.items():
+        for t in pair_to_tracks.get(key, []):
+            t.lastfm_track_attempted = True
+            if info:
+                _apply_lastfm_track_info(t, info)
+                enriched_count += 1
 
-    # Mark all attempted so we don't retry tracks Last.fm doesn't know about
-    for t in needs_lastfm:
-        t.lastfm_track_attempted = True
-
-    logger.info("Applied Last.fm data to %d/%d tracks", enriched_count, len(needs_lastfm))
+    logger.info(
+        "Applied Last.fm data to %d/%d tracks (%d not answered, retried next run)",
+        enriched_count, len(needs_lastfm),
+        sum(1 for t in needs_lastfm if not t.lastfm_track_attempted),
+    )
     return tracks
 
 
 def backfill_lastfm_artist_tags(
     api_key: str,
     tracks: list[Track],
+    ignore_attempted: bool = False,
 ) -> list[Track]:
     """Fetch and apply Last.fm artist-level tags.
 
@@ -446,26 +632,40 @@ def backfill_lastfm_artist_tags(
     Caches by unique first-artist name, so the API call count is roughly
     `unique_artists` rather than `tracks` (often a 4× speedup).
 
-    Only fetches for tracks that don't already have artist_tags populated.
+    Only fetches for tracks that don't already have artist_tags populated,
+    and never for channel uploads named after the channel.
+    ignore_attempted=True re-checks flagged tracks that still have no tags.
     """
     # Skip tracks we've already tried — even if they got no tags back.
     # This is the key efficiency win: ~150 obscure artists that returned
     # empty tag lists get re-queried on every sync without it.
-    needs_artist_tags = [
-        t for t in tracks
-        if not t.artist_tags and t.artist and not t.lastfm_attempted
-    ]
+    needs_artist_tags = lastfm_artist_tag_candidates(tracks, ignore_attempted)
+
+    channel_uploads = (
+        sum(1 for t in tracks if _wants_artist_tags(t, ignore_attempted))
+        - len(needs_artist_tags)
+    )
+    if channel_uploads:
+        logger.info(
+            "Skipping artist tags for %d channel upload(s) whose artist looks like "
+            "the uploading channel", channel_uploads,
+        )
 
     if not needs_artist_tags:
         logger.info("All tracks already have artist tags or were attempted")
         return tracks
+
+    if ignore_attempted:
+        # See backfill_lastfm_data: only this run's answer sets the flag.
+        for t in needs_artist_tags:
+            t.lastfm_attempted = False
 
     # Map "first artist name" -> list of Track objects sharing that artist.
     # We split on comma and use the primary artist for the lookup, the same
     # way Last.fm's track endpoint does it.
     artist_to_tracks: dict[str, list[Track]] = {}
     for t in needs_artist_tags:
-        first_artist = t.artist.split(",")[0].strip() if t.artist else ""
+        first_artist = _first_artist(t.artist)
         if first_artist:
             artist_to_tracks.setdefault(first_artist, []).append(t)
 
@@ -479,14 +679,16 @@ def backfill_lastfm_artist_tags(
     )
     artist_data = get_artists_info_batch(api_key, list(artist_to_tracks.keys()))
 
+    # Artists whose request failed are missing from artist_data and stay
+    # unmarked, so the next run retries them instead of writing them off.
     enriched_tracks = 0
     for artist_name, info in artist_data.items():
-        tags = info.get("tags", [])
+        tags = info.get("tags", []) if info else []
         # Take top 5 tags, comma-joined, lowercase for consistency
         tag_str = ", ".join(t.lower() for t in tags[:5]) if tags else ""
         for t in artist_to_tracks.get(artist_name, []):
-            # Mark as attempted regardless of whether tags came back, so we
-            # don't re-query empty artists on every future sync run
+            # Last.fm answered (with or without tags), so don't re-query
+            # this artist on every future sync run
             t.lastfm_attempted = True
             if tag_str:
                 t.artist_tags = tag_str
@@ -494,18 +696,12 @@ def backfill_lastfm_artist_tags(
                     t.tag_source = "lastfm_artist"
                 enriched_tracks += 1
 
-    # Also mark artists that didn't even respond (404 / network failure)
-    # so we eventually stop hammering them. They can be retried by clearing
-    # the lastfm_attempted column manually.
-    for artist_name in artist_to_tracks:
-        if artist_name not in artist_data:
-            for t in artist_to_tracks[artist_name]:
-                t.lastfm_attempted = True
-
     logger.info(
-        "Applied Last.fm artist tags to %d/%d tracks (from %d/%d unique artists with tags)",
+        "Applied Last.fm artist tags to %d/%d tracks (from %d/%d unique artists with tags, "
+        "%d not answered, retried next run)",
         enriched_tracks, len(needs_artist_tags),
-        len([a for a, info in artist_data.items() if info.get("tags")]),
+        len([a for a, info in artist_data.items() if info and info.get("tags")]),
         len(artist_to_tracks),
+        len(artist_to_tracks) - len(artist_data),
     )
     return tracks

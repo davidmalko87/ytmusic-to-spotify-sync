@@ -7,7 +7,51 @@ Version: 0.1.0
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass, field
+
+# "3:45", "1:02:03", "3:45.5": the clock form playlist exporters often write
+_CLOCK_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d{1,2}(?:\.\d+)?)$")
+
+# JSON types of the numeric and yes/no columns; every other column is text.
+# to_json_dict converts to_csv_row's cells, so the JSON copy rounds like the
+# CSV. An empty number (or an unknown explicit flag) is null, an empty flag is
+# false, and empty text stays "".
+_JSON_INT_COLUMNS = frozenset({
+    "spotify_duration_ms", "key", "mode", "time_signature", "popularity", "track_number",
+    "lastfm_playcount", "lastfm_listeners",
+})
+_JSON_FLOAT_COLUMNS = frozenset({
+    "duration", "danceability", "energy", "valence", "tempo", "loudness", "speechiness",
+    "acousticness", "instrumentalness", "liveness", "match_confidence",
+})
+_JSON_BOOL_COLUMNS = frozenset({
+    "explicit", "audio_features_fetched", "lastfm_attempted", "lastfm_track_attempted",
+    "spotify_metadata_attempted", "spotify_genres_attempted", "match_attempted",
+})
+
+
+def parse_duration(value: object) -> float:
+    """Seconds from a CSV duration cell: '245', '245.5', 'm:ss' or 'h:mm:ss' ('' is 0.0).
+
+    Anything else raises ValueError naming the value, so the CSV reader can
+    point at the row instead of crashing with a bare float() traceback.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    clock = _CLOCK_RE.match(text)
+    if clock:
+        hours, minutes, seconds = clock.groups()
+        return int(hours or 0) * 3600 + int(minutes) * 60 + float(seconds)
+    try:
+        total = float(text)
+    except ValueError:
+        total = math.nan
+    if not math.isfinite(total):  # also rejects 'nan'/'inf', which would break the JSON copy
+        raise ValueError(f"duration {text!r} is not a number of seconds or m:ss")
+    return total
 
 
 @dataclass
@@ -154,6 +198,22 @@ class Track:
             "last_synced": self.last_synced,
         }
 
+    def to_json_dict(self) -> dict[str, str | int | float | bool | None]:
+        """The CSV row with JSON types: numbers, true/false, null for an empty number."""
+        typed: dict[str, str | int | float | bool | None] = {}
+        for column, text in self.to_csv_row().items():
+            if column in _JSON_BOOL_COLUMNS:
+                # 'explicit' is unknown ('') until a Spotify match; the flags are plain yes/no
+                typed[column] = None if column == "explicit" and not text else text == "true"
+            elif column in _JSON_INT_COLUMNS:
+                typed[column] = int(text) if text else None
+            elif column in _JSON_FLOAT_COLUMNS:
+                number = float(text) if text else None
+                typed[column] = number if number is None or math.isfinite(number) else None
+            else:
+                typed[column] = text
+        return typed
+
     @classmethod
     def from_csv_row(cls, row: dict[str, str]) -> Track:
         """Deserialize from a CSV row dict."""
@@ -164,7 +224,7 @@ class Track:
             isrc=row.get("isrc", "") or row.get("isrc_enriched", ""),
             platform=row.get("platform", ""),
             track_id=row.get("trackId", ""),
-            duration=float(row["duration"]) if row.get("duration") else 0.0,
+            duration=parse_duration(row.get("duration", "")),
             added_date=row.get("addedDate", ""),
             added_by=row.get("addedBy", ""),
             url=row.get("url", ""),

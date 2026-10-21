@@ -11,8 +11,8 @@ body:
     id: version
     attributes:
       label: Tool version
-      description: Run `python -c "import playlist_sync; print(playlist_sync.__version__)"` and paste the output.
-      placeholder: "0.4.0"
+      description: Run `ytmusic-sync --version` (from a git clone, `python playlist_sync.py --version`) and paste the output.
+      placeholder: "ytmusic-to-spotify-sync 0.8.0"
     validations:
       required: true
 
@@ -39,7 +39,7 @@ body:
       label: Steps to reproduce
       description: Provide the exact commands and actions that trigger the bug.
       placeholder: |
-        1. Run `python playlist_sync.py sync --dry-run`
+        1. Run `ytmusic-sync sync --dry-run`
         2. ...
     validations:
       required: true

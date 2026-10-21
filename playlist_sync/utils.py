@@ -10,10 +10,11 @@ from __future__ import annotations
 import html
 import logging
 import re
+import sys
 import unicodedata
 from logging.handlers import RotatingFileHandler
 
-from playlist_sync.config import LOG_FILE
+from playlist_sync.config import LOG_FILE, ensure_home
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -30,8 +31,15 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler — always DEBUG, rotated at 5 MB with 3 backups
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    # File handler — always DEBUG, rotated at 5 MB with 3 backups. The settings
+    # folder may not exist yet (first run of an installed copy, new PLAYLIST_SYNC_HOME).
+    try:
+        ensure_home()
+        fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    except OSError as e:
+        print(f"Error: cannot write to the settings folder {LOG_FILE.parent} ({e}).")
+        print("Check PLAYLIST_SYNC_HOME, or create that folder and try again.")
+        sys.exit(1)
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
