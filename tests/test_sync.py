@@ -265,3 +265,129 @@ def test_csv_sync_with_missing_source_csv_names_the_path(
     assert exit_info.value.code == 1
     assert str(home / "exports" / "gone.csv") in capsys.readouterr().out
     assert world.match_calls == 0 and world.playlist == []
+
+
+# -- retry-unmatched keeps full rows (B-9) ------------------------------------
+
+def retry(**options: object) -> None:
+    args = argparse.Namespace(command="retry-unmatched", verbose=False, dry_run=False)
+    for key, value in options.items():
+        setattr(args, key, value)
+    cli.dispatch(args)
+
+
+def test_retry_unmatched_keeps_the_full_enriched_row(world: FakeWorld,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    real_match = world._match
+    monkeypatch.setattr(cli, "match_track", lambda sp, t: (
+        MatchResult(source_track=t) if t.track_id == "vid00000003" else real_match(sp, t)))
+    sync()
+    rows = read_enriched_csv()
+    row = next(t for t in rows if t.track_id == "vid00000003")
+    assert row.match_attempted and not row.spotify_uri
+    # Enrichment a 'lastfm' run (or the YT fetch) gave the unmatched row
+    row.isrc, row.added_date = "GBUM71029604", "2026-01-02"
+    row.lastfm_listeners, row.artist_tags, row.primary_genre = 1234, "rock, indie", "rock"
+    write_enriched_csv(rows)
+
+    seen: list[Track] = []
+
+    def match_and_record(sp: object, t: Track) -> MatchResult:
+        seen.append(Track(**vars(t)))
+        return real_match(sp, t)
+
+    monkeypatch.setattr(cli, "match_track", match_and_record)
+    retry()
+
+    assert [(t.isrc, t.duration) for t in seen] == [("GBUM71029604", 200.0)]  # full input
+    after = {t.track_id: t for t in read_enriched_csv()}
+    assert len(after) == 5
+    fixed = after["vid00000003"]
+    assert fixed.spotify_uri == "spotify:track:vid00000003"
+    assert (fixed.lastfm_listeners, fixed.artist_tags) == (1234, "rock, indie")
+    assert fixed.primary_genre == "rock"
+    assert (fixed.added_date, fixed.duration) == ("2026-01-02", 200.0)
+    assert world.playlist.count("spotify:track:vid00000003") == 1
+    assert not cfg.UNMATCHED_CSV.exists()
+
+
+def test_retry_unmatched_skips_rows_matched_since_and_rows_gone_from_the_data(
+        world: FakeWorld, monkeypatch: pytest.MonkeyPatch) -> None:
+    sync()  # everything matched
+    from playlist_sync.csv_manager import write_unmatched_csv
+    # A stale unmatched.csv: one row matched since, one track no longer in the data
+    write_unmatched_csv([yt_track(2), yt_track(99)])
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "match_track", lambda sp, t: calls.append(t.track_id) or
+                        MatchResult(source_track=t, spotify_uri=f"spotify:track:{t.track_id}"))
+    retry()
+    assert calls == []  # nothing re-searched, nothing added
+    assert len(world.playlist) == 5
+
+
+def test_retry_unmatched_dry_run_writes_nothing(world: FakeWorld,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    real_match = world._match
+    monkeypatch.setattr(cli, "match_track", lambda sp, t: (
+        MatchResult(source_track=t) if t.track_id == "vid00000003" else real_match(sp, t)))
+    sync()
+    before = cfg.ENRICHED_CSV.read_bytes()
+    monkeypatch.setattr(cli, "match_track", real_match)
+    retry(dry_run=True)
+    assert cfg.ENRICHED_CSV.read_bytes() == before
+    assert "spotify:track:vid00000003" not in world.playlist
+    assert cfg.UNMATCHED_CSV.exists()
+
+
+# -- import-csv does not wipe existing sync data (MS-M-5) ---------------------
+
+def import_csv(**options: object) -> None:
+    args = argparse.Namespace(command="import-csv", verbose=False, dry_run=False, csv=None,
+                              force=False)
+    for key, value in options.items():
+        setattr(args, key, value)
+    cli.dispatch(args)
+
+
+def test_import_csv_refuses_to_replace_existing_matches(world: FakeWorld, home: Path) -> None:
+    sync()
+    before = cfg.ENRICHED_CSV.read_bytes()
+    export = home / "export.csv"
+    export.write_text("title,artist,album,trackId,platform\nSong 1,Artist 1,Album,vid00000001,"
+                      "ytmusic\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        import_csv(csv=str(export))
+    assert exc.value.code == 1
+    assert cfg.ENRICHED_CSV.read_bytes() == before
+
+
+def test_import_csv_force_archives_the_old_data_first(world: FakeWorld, home: Path) -> None:
+    sync()
+    before = cfg.ENRICHED_CSV.read_bytes()
+    export = home / "export.csv"
+    export.write_text("title,artist,album,trackId,platform\nSong 1,Artist 1,Album,vid00000001,"
+                      "ytmusic\n", encoding="utf-8")
+    import_csv(csv=str(export), force=True)
+    archived = list((cfg.DATA_DIR / "archive").glob("*/playlist_enriched.csv"))
+    assert len(archived) == 1 and archived[0].read_bytes() == before
+    assert [t.track_id for t in read_enriched_csv()] == ["vid00000001"]
+
+
+def test_import_csv_first_run_needs_no_force(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: None)
+    export = home / "export.csv"
+    export.write_text("title,artist,album,trackId,platform\nA,B,C,vid00000001,ytmusic\n",
+                      encoding="utf-8")
+    import_csv(csv=str(export))
+    assert len(read_enriched_csv()) == 1
+
+
+def test_sync_after_a_forced_import_does_not_duplicate_the_playlist(world: FakeWorld,
+                                                                    home: Path) -> None:
+    sync()
+    export = home / "export.csv"
+    export.write_text("title,artist,album,trackId,platform\n" + "".join(
+        f"Song {n},Artist {n},Album,vid{n:08d},ytmusic\n" for n in range(1, 6)), encoding="utf-8")
+    import_csv(csv=str(export), force=True)  # what menu 10 > 1 does after its warning
+    sync()
+    assert sorted(world.playlist) == sorted(f"spotify:track:vid{n:08d}" for n in range(1, 6))

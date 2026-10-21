@@ -84,6 +84,11 @@ from playlist_sync.ytmusic_client import (
 logger = logging.getLogger("playlist_sync")
 
 
+# sync-likes holds back unsaves above this size: more than MASS_UNSAVE_MIN likes
+# and more than MASS_UNSAVE_SHARE of the previous snapshot gone in one run
+MASS_UNSAVE_MIN = 50
+MASS_UNSAVE_SHARE = 0.2
+
 # ── Debug stats writer ──────────────────────────────────────────────
 
 def _write_debug_stats(
@@ -301,6 +306,23 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
         if len(tracks) > 5:
             print(f"  ... and {len(tracks) - 5} more")
         return
+
+    if ENRICHED_CSV.exists():
+        if not getattr(args, "force", False):
+            # The import replaces every Spotify match: the next sync would search
+            # all tracks again and add each one to the Spotify playlist a second time
+            print(f"Error: {ENRICHED_CSV} already holds your sync data and Spotify matches.")
+            print("import-csv is a one-time starting point. To replace that data anyway")
+            print(f"(it is archived, not deleted): {cli_command()} import-csv --force")
+            sys.exit(1)
+        from playlist_sync.menu import archive_playlist_data  # menu imports cli
+        try:
+            archived = archive_playlist_data("before-csv-import")
+        except OSError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        if archived:
+            print(f"Current sync data moved to {archived}")
 
     snapshot_path = save_snapshot(tracks)
     print(f"Snapshot saved: {snapshot_path.name}")
@@ -628,8 +650,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 # the matches stay in the cache as unpushed for the next run.
                 if isinstance(e, KeyboardInterrupt):
                     try:
-                        push_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
-                            [r.spotify_uri for r in matched_results]
+                        push_uris = _missing_from_playlist(
+                            sp, config, restored_unpushed + [r.spotify_uri for r in matched_results])
                         _push_and_mark(sp, config, push_uris, match_cache, args.dry_run)
                     except KeyboardInterrupt:
                         print("\nPush interrupted - the next sync adds the rest.")
@@ -651,8 +673,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # A long rate limit or a dropped connection here must not lose the matches:
     # keep them in the cache as unpushed and the old snapshot for the removals.
     try:
-        new_uris = _missing_from_playlist(sp, config, restored_unpushed) + \
-            [r.spotify_uri for r in matched_results]
+        # Only what the playlist lacks: after the local data was replaced (import-csv,
+        # a deleted CSV) every track matches as new and would be added a second time
+        new_uris = _missing_from_playlist(
+            sp, config, restored_unpushed + [r.spotify_uri for r in matched_results])
         fully_pushed = _push_and_mark(sp, config, new_uris, match_cache, args.dry_run)
         _remove_deleted(sp, config, diff, existing_map, args.dry_run)
     except (RateLimitError, requests.exceptions.RequestException) as e:
@@ -760,42 +784,52 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
         print("No unmatched.csv found -- nothing to retry.")
         return
 
-    import pandas as pd
-    df = pd.read_csv(UNMATCHED_CSV, encoding="utf-8-sig", dtype=str, keep_default_na=False)
-    tracks = [Track.from_csv_row(row.to_dict()) for _, row in df.iterrows()]
+    # unmatched.csv picks the tracks; the enriched CSV supplies their full rows.
+    # Matching the 6-column unmatched.csv rows would drop ISRC and duration from
+    # the search and wipe every enriched field when the match replaces the row.
+    wanted = {t.fingerprint for t in read_source_csv(UNMATCHED_CSV)}
+    rows = read_enriched_csv()
+    tracks = [t for t in rows if t.fingerprint in wanted and not t.has_spotify_match]
+    gone = len(wanted - {t.fingerprint for t in rows})
+    if gone:
+        print(f"Skipping {gone} track(s) in unmatched.csv that are no longer in the sync data.")
+    if not tracks:
+        print("Nothing to retry: every track in unmatched.csv is matched or gone.")
+        return
     print(f"Loaded {len(tracks)} unmatched tracks")
 
     sp = get_spotify_client(config)
     newly_matched: list[Track] = []
     still_unmatched: list[Track] = []
 
-    for track in tqdm(tracks, desc="Retrying", unit="track"):
-        result = match_track(sp, track)
-        # Refresh the attempted flag — we just retried.
-        track.match_attempted = True
-        if result.matched:
-            enriched = apply_match_to_track(track, result)
-            newly_matched.append(enriched)
-        else:
-            still_unmatched.append(track)
+    try:
+        for track in tqdm(tracks, desc="Retrying", unit="track"):
+            result = match_track(sp, track)
+            # Refresh the attempted flag -- we just retried.
+            track.match_attempted = True
+            if result.matched:
+                newly_matched.append(apply_match_to_track(track, result))  # updates the row in place
+            else:
+                still_unmatched.append(track)
+    except (RateLimitError, SearchUnavailable, KeyboardInterrupt) as e:
+        # Nothing is written, so these tracks simply stay unmatched for the next retry
+        reason = "stopped" if isinstance(e, KeyboardInterrupt) else f"Spotify is unavailable ({e})"
+        print(f"\nRetry {reason}; nothing was changed. Run retry-unmatched again later.")
+        return
 
     print(f"Newly matched: {len(newly_matched)}, Still unmatched: {len(still_unmatched)}")
 
-    if not args.dry_run and newly_matched:
-        uris = [t.spotify_uri for t in newly_matched]
-        add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris)
+    if args.dry_run or not newly_matched:
+        return
+    uris = _missing_from_playlist(sp, config, [t.spotify_uri for t in newly_matched])
+    _push_and_mark(sp, config, uris, {}, dry_run=False)
+    write_enriched_csv(rows)
 
-        # Replace existing unmatched entries with the newly matched versions
-        newly_matched_fps = {t.fingerprint for t in newly_matched}
-        existing = [t for t in read_enriched_csv() if t.fingerprint not in newly_matched_fps]
-        existing.extend(newly_matched)
-        write_enriched_csv(existing)
-
-        if still_unmatched:
-            write_unmatched_csv(still_unmatched)
-        elif UNMATCHED_CSV.exists():
-            UNMATCHED_CSV.unlink()
-            print("All tracks matched! Removed unmatched.csv")
+    if still_unmatched:
+        write_unmatched_csv(still_unmatched)
+    elif UNMATCHED_CSV.exists():
+        UNMATCHED_CSV.unlink()
+        print("All tracks matched! Removed unmatched.csv")
 
 
 def cmd_lastfm(args: argparse.Namespace) -> None:
@@ -1179,31 +1213,57 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
     diff = diff_tracks(current, previous)
     print(f"Likes diff: {diff.summary()}")
 
-    if not diff.added and not diff.removed:
-        if not args.dry_run:
-            save_likes_snapshot(current)
-        print("Nothing to do.")
-        return
+    # A sudden mass drop is far more likely an incomplete answer from YT Music
+    # (a blank continuation page ends the fetch without an error) than a real
+    # mass un-like; unsaving on it would empty Spotify Liked Songs
+    held_back: list[Track] = []
+    if (previous and not getattr(args, "force", False)
+            and len(diff.removed) > max(MASS_UNSAVE_MIN, len(previous) * MASS_UNSAVE_SHARE)):
+        held_back, diff.removed = diff.removed, []
+        args.held_back = len(held_back)  # lets the menu offer the --force run
+        print(f"WARNING: {len(held_back)} of {len(previous)} likes are missing from YT Music's "
+              "answer; nothing is unsaved on Spotify this time.")
+        print(f"If you really un-liked them, run: {cli_command()} sync-likes --force")
 
     # Step 3: load existing likes-enriched data + main enriched CSV.
     # The main enriched CSV is reused as a match cache: if a track is
     # already matched in the playlist sync, we don't need to re-match it
-    # for likes — same Spotify URI applies.
+    # for likes -- same Spotify URI applies.
     likes_existing = read_enriched_csv(LIKES_ENRICHED_CSV)
+    likes_map: dict[str, Track] = {t.fingerprint: t for t in likes_existing}
     main_existing = read_enriched_csv()
     fingerprint_to_uri: dict[str, str] = {}
     for t in likes_existing + main_existing:
         if t.has_spotify_match:
             fingerprint_to_uri[t.fingerprint] = t.spotify_uri
 
-    # Step 4: classify added tracks — already matched (URI known) vs needs-search
+    # Earlier likes that never matched: reused for free once the playlist sync
+    # matched them, searched again only with --retry-unmatched (quota)
+    added_fps = {t.fingerprint for t in diff.added}
+    retry_now = getattr(args, "retry_unmatched", False)
+    pending = [
+        t for t in current
+        if t.fingerprint not in added_fps
+        and t.fingerprint in likes_map
+        and not likes_map[t.fingerprint].has_spotify_match
+        and (retry_now or t.fingerprint in fingerprint_to_uri)
+    ]
+
+    if not diff.added and not diff.removed and not pending:
+        if not args.dry_run:
+            save_likes_snapshot(current + held_back)
+        print("Nothing to do.")
+        return
+
+    # Step 4: classify added tracks -- already matched (URI known) vs needs-search
     sp = get_spotify_client(config)
     matched_uris: list[str] = []
     matched_likes: list[Track] = []
     unmatched_likes: list[Track] = []
+    skipped: list[Track] = []
 
     needs_search: list[Track] = []
-    for track in diff.added:
+    for track in diff.added + pending:
         uri = fingerprint_to_uri.get(track.fingerprint, "")
         if uri:
             track.spotify_uri = uri
@@ -1221,7 +1281,6 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
     if needs_search:
         # Skip-filter: same logic as cmd_sync
         searchable = []
-        skipped = []
         for t in needs_search:
             if t.platform == "ytmusic" and not t.album.strip():
                 t.skip_reason = "no_album"
@@ -1231,10 +1290,11 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
         if skipped:
             print(f"Skipped {len(skipped)} track(s) with no album metadata")
 
-        print(f"\nMatching {len(searchable)} new likes to Spotify...")
+        print(f"\nMatching {len(searchable)} likes to Spotify...")
         try:
             for track in tqdm(searchable, desc="Matching", unit="track"):
                 result = match_track(sp, track)
+                track.match_attempted = True
                 if result.matched:
                     enriched = apply_match_to_track(track, result)
                     matched_likes.append(enriched)
@@ -1267,24 +1327,34 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
             action = "[DRY RUN] Would unsave" if args.dry_run else "Unsaved"
             print(f"{action} {removed} tracks from Spotify Liked Songs")
         else:
-            print(f"  ({len(diff.removed)} unliked on YTM but no Spotify match — skipping)")
+            print(f"  ({len(diff.removed)} unliked on YTM but no Spotify match -- skipping)")
 
-    # Step 8: persist likes_enriched.csv + snapshot
+    # Step 8: persist likes_enriched.csv + snapshot. The CSV is cumulative: one row
+    # per current like (plus held-back removals, whose URIs a later unsave needs),
+    # so an old like's URI survives until the day it is un-liked.
     if not args.dry_run:
-        all_likes = matched_likes + unmatched_likes
-        if all_likes:
+        for t in matched_likes + unmatched_likes + skipped:
+            likes_map[t.fingerprint] = t
+        keep = dict.fromkeys(t.fingerprint for t in current + held_back)
+        all_likes = [likes_map[fp] for fp in keep if fp in likes_map]
+        if all_likes or LIKES_ENRICHED_CSV.exists():
             write_enriched_csv(all_likes, path=LIKES_ENRICHED_CSV)
             print(f"Likes enriched CSV updated: {LIKES_ENRICHED_CSV}")
-        if unmatched_likes:
-            write_unmatched_csv(unmatched_likes, path=LIKES_UNMATCHED_CSV)
-            print(f"Unmatched likes saved: {LIKES_UNMATCHED_CSV}")
-        save_likes_snapshot(current)
+        still_unmatched = [t for t in all_likes if not t.has_spotify_match and not t.skip_reason]
+        if still_unmatched:
+            write_unmatched_csv(still_unmatched, path=LIKES_UNMATCHED_CSV)
+            print(f"Unmatched likes saved: {LIKES_UNMATCHED_CSV} ({len(still_unmatched)} total; "
+                  f"retry with '{cli_command()} sync-likes --retry-unmatched')")
+        elif LIKES_UNMATCHED_CSV.exists():
+            LIKES_UNMATCHED_CSV.unlink()
+        save_likes_snapshot(current + held_back)
         print("Likes snapshot updated.")
 
     print("\n--- Likes Sync Summary ---")
     print(f"  Total YTM likes: {len(current)}")
     print(f"  Newly added:     {len(diff.added)}")
     print(f"  Newly removed:   {len(diff.removed)}")
+    print(f"  Retried:         {len(pending)}")
     print(f"  Matched:         {len(matched_likes)}")
     print(f"  Unmatched:       {len(unmatched_likes)}")
     print("\nLikes sync complete!")
@@ -1368,6 +1438,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_import = sub.add_parser("import-csv", help="Bootstrap from existing CSV export")
     p_import.add_argument("--csv", help="Path to CSV file")
     p_import.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_import.add_argument(
+        "--force", action="store_true",
+        help="Replace existing sync data (it is moved to data/archive/ first)",
+    )
 
     p_snap = sub.add_parser("snapshot", help="Snapshot current YT Music playlist")
     p_snap.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -1414,6 +1488,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_likes = sub.add_parser("sync-likes", help="Mirror YT Music liked songs to Spotify Liked Songs")
     p_likes.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_likes.add_argument(
+        "--retry-unmatched", action="store_true",
+        help="Also search again for likes that previously failed matching",
+    )
+    p_likes.add_argument(
+        "--force", action="store_true",
+        help="Unsave even when a large share of the likes disappeared at once",
+    )
 
     p_xyt = sub.add_parser(
         "export-yt",

@@ -42,6 +42,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(cfg, "SKIPPED_CSV", data / "skipped.csv")
     monkeypatch.setattr(cfg, "MATCH_CACHE", data / "match_cache.json")
     monkeypatch.setattr(cfg, "LIKES_SNAPSHOTS_DIR", data / "snapshots" / "likes")
+    monkeypatch.setattr(cfg, "LIKES_ENRICHED_CSV", data / "likes_enriched.csv")
+    monkeypatch.setattr(cfg, "LIKES_UNMATCHED_CSV", data / "likes_unmatched.csv")
     monkeypatch.setattr(cfg, "DEBUG_DIR", data / "debug")
     monkeypatch.setattr(cfg, "_PROCESS_ENV_KEYS", frozenset())
     # Modules that imported data paths by name keep their own copies; redirect

@@ -456,3 +456,34 @@ def test_clean_path_unescapes_macos_drag_and_drop() -> None:
 ])
 def test_local_redirect_detection(uri: str, local: bool) -> None:
     assert menu._local_redirect(uri) is local
+
+
+def test_likes_retry_is_offered_only_when_likes_failed_before(
+    keyboard: Callable[[list[str]], list[str]], fakes: dict[str, list],
+) -> None:
+    keyboard([""])  # real run; no likes_unmatched.csv -> no retry question
+    menu.action_likes()
+    keyboard(["", "y"])
+    cfg.LIKES_UNMATCHED_CSV.parent.mkdir(parents=True, exist_ok=True)
+    cfg.LIKES_UNMATCHED_CSV.write_text("title,artist\nx,y\n", encoding="utf-8")
+    menu.action_likes()
+    assert [a.retry_unmatched for a in fakes["dispatched"]] == [False, True]
+
+
+def test_held_back_unsaves_need_a_yes_in_the_menu(
+    keyboard: Callable[[list[str]], list[str]], monkeypatch: pytest.MonkeyPatch,
+    fakes: dict[str, list],
+) -> None:
+    runs: list[argparse.Namespace] = []
+
+    def dispatch(args: argparse.Namespace) -> None:
+        runs.append(args)
+        if not args.force:
+            args.held_back = 120
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    keyboard(["", ""])  # real run; Enter = no
+    menu.action_likes()
+    keyboard(["", "y"])
+    menu.action_likes()
+    assert [a.force for a in runs] == [False, False, True]
