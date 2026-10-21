@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from difflib import SequenceMatcher
 
 import spotipy
@@ -106,6 +107,37 @@ def _title_similarity(source_title: str, candidate: dict) -> float:
                _similarity(_bare_title(source), _bare_title(name)))
 
 
+def _scripts(text: str) -> set[str]:
+    """Writing systems of the letters in text: {'LATIN'}, {'CYRILLIC'}, {'CJK'}, ..."""
+    return {unicodedata.name(ch, "?").split()[0] for ch in text if ch.isalpha()}
+
+
+def _other_alphabet(source_artist: str, candidate: dict) -> bool:
+    """True when the two artist names share no writing system (Zemfira / Земфира).
+
+    Only then can a low artist similarity mean the same artist; two Latin
+    names that differ are two different artists (a cover).
+    """
+    source = _scripts(source_artist)
+    target = _scripts(" ".join(a.get("name", "") for a in candidate.get("artists", [])))
+    return bool(source) and bool(target) and not source & target
+
+
+# Suffixes that name the same recording; anything else stripped to pass the
+# title check (Remix, Part 2, Live, Acoustic) may be another version
+_SAME_RECORDING_RE = re.compile(r"remaster(?:ed)?|mono|stereo|\d{4}|[-–()\[\]\s.,]")
+
+
+def _only_bare_title_passes(source_title: str, candidate: dict) -> bool:
+    """The title passed only once a non-remaster version suffix was stripped."""
+    source = normalize_text(source_title)
+    name = normalize_text(candidate.get("name", ""))
+    if _similarity(source, name) >= MIN_TITLE_SIMILARITY:
+        return False
+    stripped = source[len(_bare_title(source)):] + name[len(_bare_title(name)):]
+    return bool(_SAME_RECORDING_RE.sub("", stripped))
+
+
 def _guard(track: Track, candidate: dict) -> str:
     """Hard checks before scoring: 'reject', 'review' (accept, flag) or 'ok'.
 
@@ -120,11 +152,14 @@ def _guard(track: Track, candidate: dict) -> str:
     if diff_sec > DURATION_MAX_DIFF_SEC:
         return "reject"
     if _artist_similarity(track.artist, candidate) >= MIN_ARTIST_SIMILARITY:
-        return "ok"
-    # Artist names written differently (Cyrillic vs Latin): only an exact
+        # A remix or "Part 2" passes only through the suffix-free comparison:
+        # accept it, but list it for a manual check
+        return "review" if _only_bare_title_passes(track.title, candidate) else "ok"
+    # Artist names in different alphabets (Cyrillic vs Latin): only an exact
     # title with a matching duration gets through, and it goes to review.csv
     if known and diff_sec <= DURATION_TOLERANCE_SEC and \
-            _title_similarity(track.title, candidate) >= 0.9:
+            _title_similarity(track.title, candidate) >= 0.9 and \
+            _other_alphabet(track.artist, candidate):
         return "review"
     return "reject"
 

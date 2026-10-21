@@ -239,3 +239,27 @@ def test_low_confidence_matches_are_listed_in_review_csv(world: FakeWorld, monke
     world.yt = [t for t in world.yt if t.track_id != "vid00000002"]
     sync()
     assert not cfg.REVIEW_CSV.exists()
+
+
+def test_same_duration_cover_by_another_latin_artist_is_rejected(monkeypatch) -> None:
+    # A low artist similarity is let through only for another alphabet; two
+    # different Latin names are two different artists
+    track = Track(title="Yesterday", artist="The Beatles", duration=125.0)
+    assert not best(track, [cand("Yesterday", ["Boyz II Men"], 123)], monkeypatch).matched
+
+
+@pytest.mark.parametrize("title,name", [
+    ("Song", "Song - Extended Remix"),
+    ("Song", "Song (Part 2)"),
+])
+def test_match_found_only_without_the_version_suffix_goes_to_review(
+        title: str, name: str, monkeypatch) -> None:
+    track = Track(title=title, artist="Band", duration=200.0)
+    result = best(track, [cand(name, ["Band"], 203)], monkeypatch)
+    assert result.matched and result.confidence < cfg.REVIEW_CONFIDENCE
+
+
+def test_remaster_suffix_is_not_sent_to_review(monkeypatch) -> None:
+    track = Track(title="Song", artist="Band", duration=200.0)
+    result = best(track, [cand("Song - 2015 Remaster", ["Band"], 201)], monkeypatch)
+    assert result.matched and result.confidence >= cfg.REVIEW_CONFIDENCE

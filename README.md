@@ -282,15 +282,21 @@ The matcher runs up to three passes in order of reliability:
 2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded); a duration within ± 5 s scores a bonus
 3. **Relaxed** — title-only search with fuzzy artist matching; catches live versions and alternate releases
 
-Before scoring, passes 2 and 3 drop every candidate that fails a hard check, so a same-title song
-by another artist, another song by the same artist or a much longer version is never accepted:
+Before scoring, passes 2 and 3 drop every candidate that fails a hard check. This rejects most
+same-title songs by other artists, other songs by the same artist and much longer versions:
 
 - the title must be at least 60 % similar (version suffixes such as ` - 2015 Remaster` or
-  `(Live)` are ignored for this);
+  `(Live)` are ignored for this). A match that passes only once a suffix other than a remaster
+  note is ignored (` - Extended Remix`, `(Part 2)`, `(Live)`) gets a confidence below 0.75;
 - when both durations are known, they may differ by 15 s at most;
 - one of the track's artists must be at least 60 % similar to one of the Spotify artists. An
   artist written in another alphabet (`Zemfira` / `Земфира`) still passes when the title is
-  near-identical and the durations are within 5 s, with a confidence below 0.75.
+  near-identical and the durations are within 5 s, with a confidence below 0.75. Two different
+  names in the same alphabet are rejected, even for a same-length cover.
+
+The checks compare text and length, not recordings: a sequel with a near-identical title by the
+same artist (`The Unforgiven II` / `The Unforgiven`, 9 s apart) can still pass when the right
+track is missing from Spotify's results.
 
 Fuzzy matches (passes 2 and 3) below confidence 0.75 are still added to Spotify and also listed
 in `data/review.csv`, lowest first, with both links, so you can check them by hand. The file is
