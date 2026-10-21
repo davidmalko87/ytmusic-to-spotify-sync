@@ -90,6 +90,7 @@ UNMATCHED_CSV = DATA_DIR / "unmatched.csv"
 SKIPPED_CSV = DATA_DIR / "skipped.csv"
 LIKES_ENRICHED_CSV = DATA_DIR / "likes_enriched.csv"
 LIKES_UNMATCHED_CSV = DATA_DIR / "likes_unmatched.csv"
+REVIEW_CSV = DATA_DIR / "review.csv"
 LOG_FILE = PROJECT_ROOT / "playlist_sync.log"
 
 # Enriched CSV columns (original + enrichment)
@@ -111,8 +112,17 @@ ENRICHED_COLUMNS = [
     "match_method", "match_confidence", "first_synced", "last_synced",
 ]
 
-# Duration tolerance for track matching (seconds)
+# Duration tolerance for track matching (seconds): within it a candidate
+# scores a bonus; beyond DURATION_MAX_DIFF_SEC it is rejected outright
 DURATION_TOLERANCE_SEC = 5
+DURATION_MAX_DIFF_SEC = 15
+
+# Hard floors a title/artist candidate must reach whatever its total score
+MIN_TITLE_SIMILARITY = 0.6
+MIN_ARTIST_SIMILARITY = 0.6
+
+# Title/artist matches below this confidence are listed in data/review.csv
+REVIEW_CONFIDENCE = 0.75
 
 # Spotify API batch limits
 SPOTIFY_PLAYLIST_BATCH = 100

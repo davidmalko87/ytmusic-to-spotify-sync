@@ -17,12 +17,47 @@ import pandas as pd
 from playlist_sync.config import (
     ENRICHED_COLUMNS,
     ENRICHED_CSV,
+    REVIEW_CSV,
     SKIPPED_CSV,
     UNMATCHED_CSV,
 )
 from playlist_sync.models import Track
 
 logger = logging.getLogger("playlist_sync")
+
+REVIEW_COLUMNS = ["title", "artist", "album", "duration", "spotify_duration", "match_method",
+                  "match_confidence", "spotify_url", "url", "trackId"]
+
+
+def write_review_csv(tracks: list[Track], path: Path | None = None) -> None:
+    """List low-confidence matches for a manual check; remove the file when there are none.
+
+    Rebuilt from the enriched rows on every sync, so a match fixed or removed
+    on YT Music drops off the list by itself.
+    """
+    path = path or REVIEW_CSV
+    if not tracks:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "title": t.title,
+            "artist": t.artist,
+            "album": t.album,
+            "duration": f"{t.duration:.0f}" if t.duration else "",
+            "spotify_duration": (f"{t.spotify_duration_ms / 1000:.0f}"
+                                 if t.spotify_duration_ms else ""),
+            "match_method": t.match_method,
+            "match_confidence": f"{t.match_confidence:.2f}",
+            "spotify_url": t.spotify_url,
+            "url": t.url,
+            "trackId": t.track_id,
+        }
+        for t in sorted(tracks, key=lambda t: t.match_confidence)
+    ]
+    _safe_csv_write(pd.DataFrame(rows, columns=REVIEW_COLUMNS), path)
+    logger.info("Wrote %d low-confidence matches to: %s", len(tracks), path)
 
 
 class CsvFormatError(ValueError):

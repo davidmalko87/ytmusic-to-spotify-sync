@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 
 import pytest
+import spotipy
 
 from playlist_sync import cli
 from playlist_sync import config as cfg
@@ -42,6 +43,8 @@ class FakeWorld:
         self.fail_with: BaseException | None = None
         self.unavailable_on: set[int] = set()   # match calls whose search "fails"
         self.push_error: BaseException | None = None
+        self.can_edit = True                    # target playlist is the user's own
+        self.playlist_error: int | None = None  # HTTP status the playlist lookup fails with
 
         (home / "browser.json").write_text("{}", encoding="utf-8")
         for key, value in (("SPOTIPY_CLIENT_ID", "a" * 32), ("SPOTIPY_CLIENT_SECRET", "b" * 32),
@@ -59,6 +62,7 @@ class FakeWorld:
         monkeypatch.setattr(cli, "remove_tracks_from_playlist", self._remove)
         monkeypatch.setattr(cli, "get_playlist_tracks",
                             lambda sp, pid: [{"uri": u} for u in self.playlist])
+        monkeypatch.setattr(cli, "get_playlist_access", self._access)
         for name in ("backfill_track_metadata", "backfill_artist_genres",
                      "enrich_with_audio_features"):
             monkeypatch.setattr(cli, name, lambda sp, tracks: tracks)
@@ -71,6 +75,11 @@ class FakeWorld:
             raise SearchUnavailable("HTTP 503")
         return MatchResult(source_track=track, spotify_uri=f"spotify:track:{track.track_id}",
                            method="isrc", confidence=1.0)
+
+    def _access(self, sp: object, pid: str) -> dict[str, object]:
+        if self.playlist_error is not None:
+            raise spotipy.SpotifyException(self.playlist_error, -1, "playlist lookup failed")
+        return {"name": "Synced", "can_edit": self.can_edit}
 
     def _add(self, sp: object, pid: str, uris: list[str], dry_run: bool = False) -> int:
         if self.push_error is not None:

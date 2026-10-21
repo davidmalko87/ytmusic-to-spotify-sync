@@ -34,6 +34,10 @@ class FakeSpotifyServer:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def _answer(self) -> None:
+                # Drain the request body: closing a socket with unread data makes
+                # Windows reset the connection (WinError 10053) before the client
+                # reads the answer
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 outer.hits += 1
                 status, headers, body = outer.script[min(outer.hits, len(outer.script)) - 1]
                 data = json.dumps(body).encode("utf-8")

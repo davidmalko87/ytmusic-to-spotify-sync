@@ -36,7 +36,7 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 | **Guided setup wizard** | Asks for the YT Music login, both playlists, the Spotify app keys and the optional Last.fm key, checks each one live and saves it to `.env` — no manual file editing |
 | **Playlist pickers** | Choose the YT Music source from your library and the Spotify target from your playlists (or let it create one); pasted links work too |
 | **Live YT Music API** | Fetches your playlist directly via `ytmusicapi` — no manual export required |
-| **3-pass smart matching** | Normalised title + artist → fuzzy fallback, both validated by duration; an exact ISRC match runs first for CSV exports with an `isrc` column (the YT Music API has no ISRCs) |
+| **3-pass smart matching** | Normalised title + artist → fuzzy fallback, both behind hard title, artist and duration checks; an exact ISRC match runs first for CSV exports with an `isrc` column (the YT Music API has no ISRCs) |
 | **Diff-based sync** | JSON snapshots track playlist state; only added/removed tracks are touched each run |
 | **Spotify playlist management** | Adds new matches and removes deleted tracks automatically |
 | **Liked Songs sync** | Mirrors YT Music likes into Spotify **Liked Songs** |
@@ -279,10 +279,29 @@ The matcher runs up to three passes in order of reliability:
    column (`sync --from-csv`, or `import-csv` before the first sync). The YT Music API returns no
    ISRCs, so playlists and Liked Songs read from it start at pass 2. Searches Spotify by `isrc:`;
    highest accuracy, confidence 0.95–1.0
-2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded), validated by duration ± 5 s
+2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded); a duration within ± 5 s scores a bonus
 3. **Relaxed** — title-only search with fuzzy artist matching; catches live versions and alternate releases
 
+Before scoring, passes 2 and 3 drop every candidate that fails a hard check, so a same-title song
+by another artist, another song by the same artist or a much longer version is never accepted:
+
+- the title must be at least 60 % similar (version suffixes such as ` - 2015 Remaster` or
+  `(Live)` are ignored for this);
+- when both durations are known, they may differ by 15 s at most;
+- one of the track's artists must be at least 60 % similar to one of the Spotify artists. An
+  artist written in another alphabet (`Zemfira` / `Земфира`) still passes when the title is
+  near-identical and the durations are within 5 s, with a confidence below 0.75.
+
+Fuzzy matches (passes 2 and 3) below confidence 0.75 are still added to Spotify and also listed
+in `data/review.csv`, lowest first, with both links, so you can check them by hand. The file is
+rebuilt on every sync and removed when nothing needs a look.
+
 Unmatched tracks are written to `data/unmatched.csv` and can be retried later with `retry-unmatched`.
+
+`sync` exits with code 1 when the Spotify playlist cannot be opened or is not yours (checked
+before any search), or when matched tracks could not be added or removed tracks could not be
+taken off Spotify. Nothing is lost: the next sync retries them. A rate limit or `Ctrl+C` during
+matching still exits 0 with progress saved.
 
 ---
 
@@ -466,6 +485,7 @@ ytmusic-to-spotify-sync/
     ├── snapshots/             # JSON snapshots
     ├── playlist_enriched.csv  # Full enriched output (+ playlist_enriched.json copy)
     ├── exports/               # YT Music exports (export-yt)
+    ├── review.csv             # Low-confidence matches worth a manual check
     └── unmatched.csv          # Tracks that could not be matched
 ```
 

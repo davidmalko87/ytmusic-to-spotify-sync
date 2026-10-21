@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import requests
+import spotipy
 from tqdm import tqdm
 
 from playlist_sync import __version__
@@ -23,6 +24,8 @@ from playlist_sync.config import (
     LIKES_UNMATCHED_CSV,
     MATCH_CACHE,
     PROJECT_ROOT,
+    REVIEW_CONFIDENCE,
+    REVIEW_CSV,
     SKIPPED_CSV,
     SNAPSHOTS_DIR,
     UNMATCHED_CSV,
@@ -33,6 +36,7 @@ from playlist_sync.config import (
     is_unset,
     load_config,
     parse_ytmusic_playlist_id,
+    print_setup_hint,
     require_spotify_config,
     require_ytmusic_config,
     require_ytmusic_playlist,
@@ -42,6 +46,7 @@ from playlist_sync.csv_manager import (
     read_enriched_csv,
     read_source_csv,
     write_enriched_csv,
+    write_review_csv,
     write_skipped_csv,
     write_tracks_json,
     write_unmatched_csv,
@@ -65,6 +70,7 @@ from playlist_sync.spotify_client import (
     SearchUnavailable,
     add_saved_tracks,
     add_tracks_to_playlist,
+    get_playlist_access,
     get_playlist_tracks,
     get_spotify_client,
     remove_saved_tracks,
@@ -168,14 +174,15 @@ def _write_debug_stats(
 
 # ── Match cache for resume after rate limits ────────────────────────
 
-def _load_match_cache() -> dict[str, dict]:
+def _load_match_cache(quiet: bool = False) -> dict[str, dict]:
     """Load cached match results from previous interrupted runs."""
     import json
     if MATCH_CACHE.exists():
         try:
             data = json.loads(MATCH_CACHE.read_text(encoding="utf-8"))
-            print(f"Resuming: loaded {len(data)} cached matches from previous run")
-            print(f"  (To start fresh, delete: {MATCH_CACHE})")
+            if not quiet:
+                print(f"Resuming: loaded {len(data)} cached matches from previous run")
+                print(f"  (To start fresh, delete: {MATCH_CACHE})")
             return data
         except (json.JSONDecodeError, KeyError):
             pass
@@ -202,38 +209,92 @@ def _missing_from_playlist(sp: object, config: dict[str, str], uris: list[str]) 
 
 def _push_and_mark(sp: object, config: dict[str, str], uris: list[str],
                    match_cache: dict[str, dict], dry_run: bool) -> bool:
-    """Add URIs to the playlist; mark them pushed in the match cache when all went in.
+    """Add the URIs the playlist lacks; mark them pushed in the match cache when all are in.
 
-    Returns True when everything was added (or there was nothing to add).
+    Two YT Music entries can match one Spotify track, and after the local data
+    was replaced (import-csv, a deleted CSV) every track matches as new, so
+    checking the playlist first keeps it free of duplicates.
+    Returns True when everything is in the playlist (or there was nothing to add).
     """
-    if not uris:
+    wanted = list(dict.fromkeys(u for u in uris if u))
+    if not wanted:
         return True
-    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], uris, dry_run=dry_run)
+    try:
+        missing = _missing_from_playlist(sp, config, wanted)
+    except spotipy.SpotifyException as e:
+        print(f"Could not read the Spotify playlist (HTTP {e.http_status}); {len(wanted)} "
+              "matched track(s) were not added. The next sync tries again.")
+        return False
+    added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], missing,
+                                   dry_run=dry_run) if missing else 0
     action = "[DRY RUN] Would add" if dry_run else "Added"
-    print(f"{action} {added} tracks to Spotify playlist")
+    present = len(wanted) - len(missing)
+    print(f"{action} {added} tracks to Spotify playlist"
+          + (f" ({present} already there)" if present else ""))
     if dry_run:
         return True
-    if added < len(uris):
-        print(f"{len(uris) - added} matched track(s) could not be added; run "
-              f"'{cli_command()} repush' (menu 6) to add them.")
+    if added < len(missing):
+        print(f"{len(missing) - added} matched track(s) could not be added; the next sync "
+              f"tries again, or run '{cli_command()} repush' (menu 6).")
         return False
-    pushed = set(uris)
+    pushed = set(wanted)
     for entry in match_cache.values():
         if entry.get("spotify_uri") in pushed:
             entry["pushed"] = True
     return True
 
 
-def _remove_deleted(sp: object, config: dict[str, str], diff: object,
-                    existing_map: dict[str, Track], dry_run: bool) -> None:
-    """Remove from the Spotify playlist the tracks deleted on YT Music since the last run."""
-    remove_uris = [existing_map[t.fingerprint].spotify_uri for t in diff.removed
-                   if t.fingerprint in existing_map and existing_map[t.fingerprint].spotify_uri]
-    if remove_uris:
-        removed = remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], remove_uris,
-                                              dry_run=dry_run)
-        action = "[DRY RUN] Would remove" if dry_run else "Removed"
-        print(f"{action} {removed} tracks from Spotify playlist")
+def _remove_deleted(sp: object, config: dict[str, str], gone: list[Track],
+                    still_wanted: set[str], dry_run: bool) -> bool:
+    """Remove from the Spotify playlist the tracks deleted on YT Music since the last sync.
+
+    Spotify removes every occurrence of a URI, so a track another current YT
+    Music entry still matches stays. Returns False when a removal failed.
+    """
+    gone_uris = list(dict.fromkeys(t.spotify_uri for t in gone if t.spotify_uri))
+    remove_uris = [u for u in gone_uris if u not in still_wanted]
+    if len(remove_uris) < len(gone_uris):
+        print(f"Kept on Spotify: {len(gone_uris) - len(remove_uris)} track(s) another "
+              "YT Music entry still matches.")
+    if not remove_uris:
+        return True
+    removed = remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], remove_uris,
+                                          dry_run=dry_run)
+    action = "[DRY RUN] Would remove" if dry_run else "Removed"
+    print(f"{action} {removed} tracks from Spotify playlist")
+    if not dry_run and removed < len(remove_uris):
+        print(f"{len(remove_uris) - removed} track(s) could not be removed; "
+              "the next sync tries again.")
+        return False
+    return True
+
+
+def _require_editable_playlist(sp: object, config: dict[str, str]) -> None:
+    """Stop before any search when the target Spotify playlist is missing or read-only.
+
+    Otherwise a wrong playlist only shows up after the whole matching run.
+    """
+    playlist_id = config["SPOTIFY_PLAYLIST_ID"]
+    try:
+        access = get_playlist_access(sp, playlist_id)
+    except requests.exceptions.RequestException as e:
+        print(f"Error: could not reach Spotify ({e}). Nothing was changed; try again later.")
+        sys.exit(1)
+    except spotipy.SpotifyException as e:
+        if e.http_status == 429:
+            # spotipy also reports retries exhausted on a 5xx as a 429
+            print("Error: Spotify is not answering right now (rate limit or server trouble). "
+                  "Nothing was changed; sync again later.")
+            sys.exit(1)
+        print(f"Error: Spotify cannot open the target playlist {playlist_id} "
+              f"(HTTP {e.http_status}).")
+        print_setup_hint("pick the Spotify playlist again")
+        sys.exit(1)
+    if not access["can_edit"]:
+        print(f"Error: the Spotify playlist '{access['name']}' belongs to someone else, "
+              "so tracks cannot be added to it.")
+        print_setup_hint("pick one of your own playlists")
+        sys.exit(1)
 
 
 def _clear_match_cache() -> None:
@@ -423,12 +484,22 @@ def cmd_sync(args: argparse.Namespace) -> None:
     diff = diff_tracks(current, previous)
     print(f"Diff: {diff.summary()}")
 
+    # Tracks gone from the source whose Spotify match an earlier sync recorded.
+    # Taken from the enriched CSV rather than diff.removed: 'snapshot' and
+    # 'import-csv' overwrite the snapshot, which used to lose these removals.
+    # No snapshot of this source (first run, source switch): remove nothing.
+    current_fps = {t.fingerprint for t in current}
+    gone: list[Track] = [] if previous is None else [
+        t for fp, t in existing_map.items() if fp not in current_fps and t.spotify_uri
+    ]
+
     # Step 4: Separate already-matched from needs-matching
     needs_matching: list[Track] = []
     already_matched: list[Track] = []
     skipped_tracks: list[Track] = []
     previously_failed: list[Track] = []   # tracks where matcher already gave up
     unmatched_tracks: list[Track] = []    # searched this run, no match (rows_to_keep needs it early)
+    deferred = 0                          # tracks left for a later run by --limit
 
     retry_unmatched_now = getattr(args, "retry_unmatched", False)
 
@@ -492,8 +563,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         seen = {t.fingerprint for t in rows}
         leftovers = list(needs_matching)
         if include_removed:
-            leftovers += [existing_map[t.fingerprint] for t in diff.removed
-                          if t.fingerprint in existing_map]
+            leftovers += gone
         for t in leftovers:
             if t.fingerprint not in seen:
                 rows.append(existing_map.get(t.fingerprint, t))
@@ -525,7 +595,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if e.get("matched") and e.get("spotify_uri") and not e.get("pushed")
     ]
 
-    if not needs_matching and not diff.removed and not needs_enrichment and not restored_unpushed:
+    if not needs_matching and not gone and not needs_enrichment and not restored_unpushed:
         # Still save if we just enriched
         if not args.dry_run:
             write_enriched_csv(rows_to_keep())
@@ -536,6 +606,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Step 6: Match new tracks (with resume support)
     sp = get_spotify_client(config)
+    _require_editable_playlist(sp, config)
     matched_results = []
 
     if needs_matching:
@@ -577,7 +648,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
             limit = getattr(args, "limit", None)
             if limit and len(to_search) > limit:
-                print(f"Limiting to {limit} tracks this run ({len(to_search) - limit} remaining for next run)")
+                deferred = len(to_search) - limit
+                print(f"Limiting to {limit} tracks this run ({deferred} remaining for next run)")
                 to_search = to_search[:limit]
 
             print(f"\nMatching {len(to_search)} tracks to Spotify...")
@@ -651,9 +723,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 # the matches stay in the cache as unpushed for the next run.
                 if isinstance(e, KeyboardInterrupt):
                     try:
-                        push_uris = _missing_from_playlist(
-                            sp, config, restored_unpushed + [r.spotify_uri for r in matched_results])
-                        _push_and_mark(sp, config, push_uris, match_cache, args.dry_run)
+                        _push_and_mark(sp, config,
+                                       restored_unpushed + [r.spotify_uri for r in matched_results],
+                                       match_cache, args.dry_run)
                     except KeyboardInterrupt:
                         print("\nPush interrupted - the next sync adds the rest.")
                 elif matched_results:
@@ -674,19 +746,24 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # A long rate limit or a dropped connection here must not lose the matches:
     # keep them in the cache as unpushed and the old snapshot for the removals.
     try:
-        # Only what the playlist lacks: after the local data was replaced (import-csv,
-        # a deleted CSV) every track matches as new and would be added a second time
-        new_uris = _missing_from_playlist(
-            sp, config, restored_unpushed + [r.spotify_uri for r in matched_results])
-        fully_pushed = _push_and_mark(sp, config, new_uris, match_cache, args.dry_run)
-        _remove_deleted(sp, config, diff, existing_map, args.dry_run)
-    except (RateLimitError, requests.exceptions.RequestException) as e:
+        fully_pushed = _push_and_mark(sp, config,
+                                      restored_unpushed + [r.spotify_uri for r in matched_results],
+                                      match_cache, args.dry_run)
+        # already_matched now holds every current entry with a Spotify match
+        still_wanted = {t.spotify_uri for t in already_matched if t.spotify_uri}
+        removal_failed = not _remove_deleted(sp, config, gone, still_wanted, args.dry_run)
+    except (RateLimitError, requests.exceptions.RequestException,
+            spotipy.SpotifyException) as e:
         print(f"\nSpotify stopped accepting changes ({e}). Nothing is lost: the next sync "
               "adds the matched tracks and applies the removals.")
         if not args.dry_run:
             _save_match_cache(match_cache)
             write_enriched_csv(rows_to_keep(include_removed=True))
         return
+
+    # New matches were appended to already_matched last (with matched_results);
+    # the summary and debug stats count them once, as "newly matched"
+    prior_matched = already_matched[:len(already_matched) - len(matched_results)]
 
     # Step 8: Backfill Spotify metadata, genres, and audio features
     if already_matched and not args.dry_run:
@@ -713,12 +790,21 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # previously_failed tracks must be included in the CSV write so
         # their match_attempted=True flag survives the round-trip; otherwise
         # next sync would treat them as fresh again.
-        all_tracks = rows_to_keep()
+        # A failed removal keeps the gone rows, so their URIs are retried next sync
+        all_tracks = rows_to_keep(include_removed=removal_failed)
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
         write_enriched_csv(all_tracks)
         print(f"Enriched CSV updated: {ENRICHED_CSV}")
+
+        # Fuzzy matches below REVIEW_CONFIDENCE are pushed, but listed for a manual check
+        review = [t for t in all_tracks if t.has_spotify_match
+                  and t.match_method in ("title_artist", "relaxed")
+                  and t.match_confidence < REVIEW_CONFIDENCE]
+        write_review_csv(review)
+        if review:
+            print(f"Matches worth a check: {REVIEW_CSV} ({len(review)})")
 
         # unmatched.csv reflects every track currently without a Spotify
         # match — both the freshly-failed batch and the long-tail of
@@ -740,7 +826,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # (e.g. plotting match rate over time, monitoring sync health).
         _write_debug_stats(
             current=current,
-            already_matched=already_matched,
+            already_matched=prior_matched,
             matched_results=matched_results,
             unmatched=all_unmatched,
             skipped=skipped_tracks,
@@ -755,11 +841,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Sync summary
     limit = getattr(args, "limit", None)
-    total_still_pending = len(current) - len(already_matched) - len(matched_results) - len(unmatched_tracks)
 
     print("\n--- Sync Summary ---")
     print(f"  Total tracks:    {len(current)}")
-    print(f"  Already matched: {len(already_matched)}")
+    print(f"  Already matched: {len(prior_matched)}")
     print(f"  Newly matched:   {len(matched_results)}")
     print(f"  Unmatched:       {len(unmatched_tracks)}")
     if matched_results:
@@ -768,8 +853,20 @@ def cmd_sync(args: argparse.Namespace) -> None:
             methods[r.method] = methods.get(r.method, 0) + 1
         print(f"  Match methods:   {methods}")
 
-    if limit and total_still_pending > 0:
-        print(f"\nPartial sync complete. {total_still_pending} tracks still need matching.")
+    # After the summary, so a failed run still shows its counts. Exit 1 lets
+    # cron/Jenkins notice; the menu catches SystemExit and keeps running.
+    problems = []
+    if not fully_pushed:
+        problems.append("some matched tracks were not added to the Spotify playlist")
+    if removal_failed:
+        problems.append("some tracks removed on YT Music are still on Spotify")
+    if problems:
+        print(f"\nSync finished with errors: {'; '.join(problems)}.")
+        print(f"Details are in the log. Sync again, or run '{cli_command()} repush'.")
+        sys.exit(1)
+
+    if deferred:
+        print(f"\nPartial sync complete. {deferred} tracks still need matching.")
         print(f"Re-run tomorrow: {cli_command()} sync --limit {limit}")
     else:
         print("\nSync complete!")
@@ -800,6 +897,7 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
     print(f"Loaded {len(tracks)} unmatched tracks")
 
     sp = get_spotify_client(config)
+    _require_editable_playlist(sp, config)
     newly_matched: list[Track] = []
     still_unmatched: list[Track] = []
 
@@ -822,8 +920,20 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
 
     if args.dry_run or not newly_matched:
         return
-    uris = _missing_from_playlist(sp, config, [t.spotify_uri for t in newly_matched])
-    _push_and_mark(sp, config, uris, {}, dry_run=False)
+    # The CSV below records these as matched, so a sync would never push them
+    # again; a failed push goes into the match cache as unpushed instead
+    pending = {t.fingerprint: {"matched": True, "spotify_uri": t.spotify_uri, "pushed": False}
+               for t in newly_matched}
+    try:
+        pushed = _push_and_mark(sp, config, [t.spotify_uri for t in newly_matched], pending,
+                                dry_run=False)
+    except (RateLimitError, requests.exceptions.RequestException) as e:
+        print(f"\nSpotify stopped accepting changes ({e}).")
+        pushed = False
+    if not pushed:
+        cache = _load_match_cache(quiet=True)
+        cache.update(pending)
+        _save_match_cache(cache)
     write_enriched_csv(rows)
 
     if still_unmatched:
@@ -831,6 +941,9 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
     elif UNMATCHED_CSV.exists():
         UNMATCHED_CSV.unlink()
         print("All tracks matched! Removed unmatched.csv")
+    if not pushed:
+        print("Matches are saved; the next sync adds the missing ones to Spotify.")
+        sys.exit(1)
 
 
 def cmd_lastfm(args: argparse.Namespace) -> None:
