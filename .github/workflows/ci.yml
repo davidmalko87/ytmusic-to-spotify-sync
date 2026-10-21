@@ -5,6 +5,8 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # publish.yml runs the whole suite (lint, tests, wheel smoke test) before it uploads
+  workflow_call:
 
 jobs:
   lint-and-verify:
@@ -49,3 +51,63 @@ jobs:
 
       - name: CLI help
         run: python playlist_sync.py --help
+
+  package:
+    name: Build & smoke-test the wheel
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build "twine>=6.1"
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: Install the wheel in a clean venv and run it outside the repo
+        shell: bash
+        run: |
+          version=$(python -c "import playlist_sync; print(playlist_sync.__version__)")
+          test -n "$version"
+          wheel="$PWD/dist/ytmusic_to_spotify_sync-${version}-py3-none-any.whl"
+          test -f "$wheel"
+          test -f "dist/ytmusic_to_spotify_sync-${version}.tar.gz"
+
+          python -m venv "$RUNNER_TEMP/venv"
+          bin="$RUNNER_TEMP/venv/bin"
+          "$bin/python" -m pip install --quiet "$wheel"
+
+          # Empty cwd and a throwaway HOME: an installed copy must use
+          # ~/.config/ytmusic-to-spotify-sync and never write to cwd or site-packages
+          work="$RUNNER_TEMP/smoke"
+          mkdir -p "$work/cwd" "$work/home"
+          cd "$work/cwd"
+          export HOME="$work/home"
+          unset XDG_CONFIG_HOME PLAYLIST_SYNC_HOME
+
+          usage=$("$bin/ytmusic-sync" --help)
+          case "$usage" in "usage: ytmusic-sync "*) ;; *) echo "::error::bad usage line"; exit 1 ;; esac
+          test "$("$bin/ytmusic-sync" --version)" = "ytmusic-to-spotify-sync ${version}"
+          "$bin/python" -c "import importlib.metadata as m, playlist_sync as p; assert m.version('ytmusic-to-spotify-sync') == p.__version__ == '${version}'"
+
+          status=$("$bin/ytmusic-sync" status)
+          echo "$status"
+          grep -qF "$HOME/.config/ytmusic-to-spotify-sync" <<< "$status"
+          test -d "$HOME/.config/ytmusic-to-spotify-sync/data/snapshots"
+          test -z "$(ls -A .)"
+
+          status=$(PLAYLIST_SYNC_HOME="$work/override" "$bin/ytmusic-sync" status)
+          grep -qF "$work/override" <<< "$status"
+          test -f "$work/override/playlist_sync.log"
+
+          site=$("$bin/python" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          for name in .env browser.json data playlist_sync.log; do
+            test ! -e "$site/$name"
+          done

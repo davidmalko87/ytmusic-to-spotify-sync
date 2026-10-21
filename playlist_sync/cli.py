@@ -15,6 +15,7 @@ from pathlib import Path
 import requests
 from tqdm import tqdm
 
+from playlist_sync import __version__
 from playlist_sync.config import (
     DEBUG_DIR,
     ENRICHED_CSV,
@@ -1423,10 +1424,14 @@ def cmd_status(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
-        prog="playlist_sync",
+        # The command the user actually typed: ytmusic-sync, or the repo script in a clone
+        prog=cli_command(),
         description="YT Music -> Spotify playlist sync with metadata enrichment",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--version", action="version", version=f"ytmusic-to-spotify-sync {__version__}",
+    )
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
