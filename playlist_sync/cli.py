@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from playlist_sync import __version__
 from playlist_sync.config import (
     DEBUG_DIR,
     ENRICHED_CSV,
+    ENRICHED_SOURCE,
     LIKES_ENRICHED_CSV,
     LIKES_UNMATCHED_CSV,
     MATCH_CACHE,
@@ -177,28 +179,64 @@ def _write_debug_stats(
 # ── Match cache for resume after rate limits ────────────────────────
 
 def _load_match_cache(quiet: bool = False) -> dict[str, dict]:
-    """Load cached match results from previous interrupted runs."""
+    """Load cached match results from previous interrupted runs.
+
+    The cache is the only record of matches not yet added to Spotify (the CSV
+    already lists them as matched), so an unreadable one is set aside loudly
+    instead of being dropped.
+    """
     import json
-    if MATCH_CACHE.exists():
+    if not MATCH_CACHE.exists():
+        return {}
+    try:
+        data = json.loads(MATCH_CACHE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("not a JSON object")
+    except (OSError, ValueError, TypeError) as e:
+        bad = MATCH_CACHE.with_name(MATCH_CACHE.name + ".bad")
         try:
-            data = json.loads(MATCH_CACHE.read_text(encoding="utf-8"))
-            if not quiet:
-                print(f"Resuming: loaded {len(data)} cached matches from previous run")
-                print(f"  (To start fresh, delete: {MATCH_CACHE})")
-            return data
-        except (json.JSONDecodeError, KeyError):
-            pass
-    return {}
+            MATCH_CACHE.replace(bad)
+        except OSError:
+            bad = MATCH_CACHE
+        logger.warning("Unreadable match cache %s: %s", MATCH_CACHE, e)
+        print(f"WARNING: the match cache could not be read ({e}); it was kept as {bad.name}.")
+        print("Matches an interrupted run had not added to Spotify yet may be missing there: "
+              f"run '{cli_command()} repush' (menu 6) once.")
+        return {}
+    if not quiet:
+        print(f"Resuming: loaded {len(data)} cached matches from previous run")
+    return data
 
 
 def _save_match_cache(cache: dict[str, dict]) -> None:
-    """Save match results so we can resume after rate limits."""
+    """Save match results so we can resume after rate limits (atomically: a kill
+    mid-write must not leave a half-written cache)."""
     import json
     ensure_dirs()
-    MATCH_CACHE.write_text(
-        json.dumps(cache, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    tmp = MATCH_CACHE.with_name(MATCH_CACHE.name + ".tmp")
+    tmp.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, MATCH_CACHE)
+
+
+def _recorded_source() -> str | None:
+    """The source (snapshot ID) sync last wrote the enriched CSV from; None if unknown."""
+    import json
+    try:
+        value = json.loads(ENRICHED_SOURCE.read_text(encoding="utf-8")).get("snapshot_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _write_synced_csv(rows: list[Track], snapshot_id: str) -> None:
+    """Write the enriched CSV and record which source its rows belong to.
+
+    The record is only updated when the CSV really was written: a locked CSV
+    still holds the old source's rows, and removals are computed from them.
+    """
+    import json
+    if write_enriched_csv(rows):
+        ENRICHED_SOURCE.write_text(json.dumps({"snapshot_id": snapshot_id}), encoding="utf-8")
 
 
 def _missing_from_playlist(sp: object, config: dict[str, str], uris: list[str]) -> list[str]:
@@ -308,7 +346,7 @@ def _clear_match_cache() -> None:
         MATCH_CACHE.unlink()
 
 
-def _snapshot_for(playlist_id: str) -> list[Track] | None:
+def _snapshot_for(playlist_id: str, quiet: bool = False) -> list[Track] | None:
     """Latest snapshot, or None when it belongs to a different YT Music playlist.
 
     Without this, switching the source playlist would diff the new playlist
@@ -316,10 +354,27 @@ def _snapshot_for(playlist_id: str) -> list[Track] | None:
     """
     recorded = latest_snapshot_playlist_id()
     if recorded and playlist_id and recorded != playlist_id:
-        print(f"Note: the last snapshot is of a different source ({recorded}).")
-        print("Comparing as a first run: nothing is removed from Spotify this time.")
+        if not quiet:
+            print(f"Note: the last snapshot is of a different source ({recorded}).")
+            print("Comparing as a first run: nothing is removed from Spotify this time.")
         return None
     return load_latest_snapshot()
+
+
+def _still_in_playlist(sp: object, config: dict[str, str], gone: list[Track]) -> list[Track]:
+    """The gone rows whose URI the Spotify playlist still holds (all of them if unknown).
+
+    After a failed removal only those must keep their row: a row kept for a
+    track that was in fact removed would block its push if it is re-added.
+    """
+    if not gone:
+        return []
+    try:
+        present = {t.get("uri") for t in get_playlist_tracks(sp, config["SPOTIFY_PLAYLIST_ID"])}
+    except (RateLimitError, requests.exceptions.RequestException, SpotifyBaseException) as e:
+        logger.warning("Could not re-read the Spotify playlist after a failed removal: %s", e)
+        return gone
+    return [t for t in gone if t.spotify_uri in present]
 
 
 # ── Command handlers ────────────────────────────────────────────────
@@ -395,6 +450,8 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     print(f"Snapshot saved: {snapshot_path.name}")
 
     write_enriched_csv(tracks)
+    # These rows come from no synced source: the next sync falls back to the snapshot
+    ENRICHED_SOURCE.unlink(missing_ok=True)
     print(f"Initial enriched CSV written: {ENRICHED_CSV}")
     print("\nNext: finish setup (S in the menu, or the 'setup' command), then sync.")
 
@@ -485,18 +542,26 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # Step 3: Diff (only against a snapshot of this same playlist -- diffing
     # against another playlist would remove all of its tracks from Spotify)
     snapshot_id = f"csv:{csv_path.resolve()}" if args.from_csv else config["YTMUSIC_PLAYLIST_ID"]
-    previous = _snapshot_for(snapshot_id)
+    previous = _snapshot_for(snapshot_id, quiet=True)
     diff = diff_tracks(current, previous)
     print(f"Diff: {diff.summary()}")
 
     # Tracks gone from the source whose Spotify match an earlier sync recorded.
     # Taken from the enriched CSV rather than diff.removed: 'snapshot' and
     # 'import-csv' overwrite the snapshot, which used to lose these removals.
-    # No snapshot of this source (first run, source switch): remove nothing.
+    # Only when the CSV rows come from this same source: 'snapshot' after a
+    # source switch tags the snapshot with the new source while the CSV still
+    # holds the old one, and every old track would be removed. Without a record
+    # (data from 0.7, import-csv) a snapshot of this source must exist.
+    recorded = _recorded_source()
+    same_source = recorded == snapshot_id if recorded is not None else previous is not None
     current_fps = {t.fingerprint for t in current}
-    gone: list[Track] = [] if previous is None else [
+    gone: list[Track] = [
         t for fp, t in existing_map.items() if fp not in current_fps and t.spotify_uri
-    ]
+    ] if same_source else []
+    if not same_source and existing_map:
+        print(f"Note: the sync data is from a different source ({recorded or 'unknown'}).")
+        print("Comparing as a first run: nothing is removed from Spotify this time.")
 
     # Step 4: Separate already-matched from needs-matching
     needs_matching: list[Track] = []
@@ -558,17 +623,15 @@ def cmd_sync(args: argparse.Namespace) -> None:
     print(f"Already matched: {len(already_matched)}, needs matching: {len(needs_matching)}, "
           f"skipped: {len(skipped_tracks)}, previously-failed: {len(previously_failed)}")
 
-    def rows_to_keep(include_removed: bool = False) -> list[Track]:
+    def rows_to_keep(removed: list[Track] | None = None) -> list[Track]:
         """Results so far plus every row not processed this run (limit, interruption).
 
-        include_removed keeps the rows of tracks removed on YT Music, for exits
-        that did not remove them from Spotify yet: the next run needs their URIs.
+        removed: rows of tracks removed on YT Music to keep, for exits that did
+        not take them off Spotify yet: the next run needs their URIs.
         """
         rows = already_matched + unmatched_tracks + skipped_tracks + previously_failed
         seen = {t.fingerprint for t in rows}
-        leftovers = list(needs_matching)
-        if include_removed:
-            leftovers += gone
+        leftovers = list(needs_matching) + list(removed or [])
         for t in leftovers:
             if t.fingerprint not in seen:
                 rows.append(existing_map.get(t.fingerprint, t))
@@ -594,7 +657,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Matches an earlier interrupted run found but never pushed. They may already
     # be marked matched in the CSV, so they are taken from the cache directly.
+    # Only tracks still in the source: a match for a track deleted on YT Music
+    # since that run would be pushed but never removed (its row is not kept).
     match_cache = _load_match_cache() if not args.dry_run else {}
+    for fp in [fp for fp, e in match_cache.items() if fp not in current_fps and not e.get("pushed")]:
+        del match_cache[fp]
     restored_unpushed = [
         e["spotify_uri"] for e in match_cache.values()
         if e.get("matched") and e.get("spotify_uri") and not e.get("pushed")
@@ -603,7 +670,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if not needs_matching and not gone and not needs_enrichment and not restored_unpushed:
         # Still save if we just enriched
         if not args.dry_run:
-            write_enriched_csv(rows_to_keep())
+            _write_synced_csv(rows_to_keep(), snapshot_id)
             print(f"Enriched CSV updated: {ENRICHED_CSV}")
             save_snapshot(current, snapshot_id)
         print("Nothing new to match.")
@@ -726,23 +793,29 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 # Push what already matched when the user stopped. After a rate
                 # limit every Spotify call would wait out Retry-After (hours), so
                 # the matches stay in the cache as unpushed for the next run.
-                if isinstance(e, KeyboardInterrupt):
-                    try:
-                        _push_and_mark(sp, config,
-                                       restored_unpushed + [r.spotify_uri for r in matched_results],
-                                       match_cache, args.dry_run)
-                    except KeyboardInterrupt:
-                        print("\nPush interrupted - the next sync adds the rest.")
-                elif matched_results:
-                    print(f"The {len(matched_results)} new match(es) are added to Spotify "
-                          "by the next sync.")
-
-                # Save every row and keep the old snapshot: removals on YT Music
-                # were not applied yet, so the next run must still see them
-                if not args.dry_run:
-                    _save_match_cache(match_cache)
-                    write_enriched_csv(rows_to_keep(include_removed=True))
-                    print(f"Enriched CSV saved: {ENRICHED_CSV}")
+                try:
+                    if isinstance(e, KeyboardInterrupt):
+                        try:
+                            _push_and_mark(sp, config,
+                                           restored_unpushed + [r.spotify_uri for r in matched_results],
+                                           match_cache, args.dry_run)
+                        except KeyboardInterrupt:
+                            print("\nPush interrupted - the next sync adds the rest.")
+                        except (RateLimitError, requests.exceptions.RequestException,
+                                SpotifyBaseException) as push_error:
+                            print(f"\nCould not add them to Spotify now ({push_error}); "
+                                  "the next sync adds the rest.")
+                    elif matched_results:
+                        print(f"The {len(matched_results)} new match(es) are added to Spotify "
+                              "by the next sync.")
+                finally:
+                    # Save every row and keep the old snapshot, whatever the push
+                    # did: removals on YT Music were not applied yet, so the next
+                    # run must still see them
+                    if not args.dry_run:
+                        _save_match_cache(match_cache)
+                        _write_synced_csv(rows_to_keep(removed=gone), snapshot_id)
+                        print(f"Enriched CSV saved: {ENRICHED_CSV}")
                 return
 
         print(f"Matched: {len(matched_results)}, Unmatched: {len(unmatched_tracks)}")
@@ -757,14 +830,15 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # already_matched now holds every current entry with a Spotify match
         still_wanted = {t.spotify_uri for t in already_matched if t.spotify_uri}
         removal_failed = not _remove_deleted(sp, config, gone, still_wanted, args.dry_run)
-    except (RateLimitError, requests.exceptions.RequestException,
-            spotipy.SpotifyException) as e:
+    except (RateLimitError, requests.exceptions.RequestException, SpotifyBaseException) as e:
         print(f"\nSpotify stopped accepting changes ({e}). Nothing is lost: the next sync "
               "adds the matched tracks and applies the removals.")
         if not args.dry_run:
             _save_match_cache(match_cache)
-            write_enriched_csv(rows_to_keep(include_removed=True))
-        return
+            _write_synced_csv(rows_to_keep(removed=_still_in_playlist(sp, config, gone)),
+                              snapshot_id)
+        # Exit 1 lets cron/Jenkins notice; the menu catches SystemExit
+        sys.exit(1)
 
     # New matches were appended to already_matched last (with matched_results);
     # the summary and debug stats count them once, as "newly matched"
@@ -772,12 +846,19 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     # Step 8: Backfill Spotify metadata, genres, and audio features
     if already_matched and not args.dry_run:
-        print("\nBackfilling Spotify metadata...")
-        backfill_track_metadata(sp, already_matched)
-        print("Fetching artist genres...")
-        backfill_artist_genres(sp, already_matched)
-        print("Fetching audio features...")
-        enrich_with_audio_features(sp, already_matched)
+        # Enrichment only: a long rate limit or a dropped connection here must
+        # not cost the CSV, snapshot and cache writes below
+        try:
+            print("\nBackfilling Spotify metadata...")
+            backfill_track_metadata(sp, already_matched)
+            print("Fetching artist genres...")
+            backfill_artist_genres(sp, already_matched)
+            print("Fetching audio features...")
+            enrich_with_audio_features(sp, already_matched)
+        except (RateLimitError, requests.exceptions.RequestException, SpotifyBaseException) as e:
+            logger.warning("Spotify enrichment stopped: %s", e)
+            print(f"Spotify stopped answering during the metadata backfill ({e}); "
+                  "the next sync fetches the rest.")
 
         # Last.fm enrichment for newly matched tracks (already_matched from
         # previous runs were enriched in Step 5; this catches new matches)
@@ -795,12 +876,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # previously_failed tracks must be included in the CSV write so
         # their match_attempted=True flag survives the round-trip; otherwise
         # next sync would treat them as fresh again.
-        # A failed removal keeps the gone rows, so their URIs are retried next sync
-        all_tracks = rows_to_keep(include_removed=removal_failed)
+        # A failed removal keeps the gone rows still on Spotify, so their URIs
+        # are retried next sync
+        all_tracks = rows_to_keep(
+            removed=_still_in_playlist(sp, config, gone) if removal_failed else None)
         print("\nClassifying genre and mood from tags...")
         classify_all_tracks(all_tracks)
 
-        write_enriched_csv(all_tracks)
+        _write_synced_csv(all_tracks, snapshot_id)
         print(f"Enriched CSV updated: {ENRICHED_CSV}")
 
         # Fuzzy matches below REVIEW_CONFIDENCE are pushed, but listed for a manual check
@@ -932,7 +1015,7 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
     try:
         pushed = _push_and_mark(sp, config, [t.spotify_uri for t in newly_matched], pending,
                                 dry_run=False)
-    except (RateLimitError, requests.exceptions.RequestException) as e:
+    except (RateLimitError, requests.exceptions.RequestException, SpotifyBaseException) as e:
         print(f"\nSpotify stopped accepting changes ({e}).")
         pushed = False
     if not pushed:

@@ -198,7 +198,9 @@ def test_five_failed_searches_in_a_row_stop_with_progress_saved(world: FakeWorld
 
 def test_rate_limited_push_loses_nothing(world: FakeWorld) -> None:
     world.push_error = RateLimitError(7200)
-    sync()
+    with pytest.raises(SystemExit) as stop:
+        sync()  # nothing reached Spotify: cron must see a failure
+    assert stop.value.code == 1
     assert world.playlist == []
     assert cfg.MATCH_CACHE.exists()  # matches kept as unpushed
     world.push_error = None
@@ -400,3 +402,14 @@ def test_sync_after_a_forced_import_does_not_duplicate_the_playlist(world: FakeW
     import_csv(csv=str(export), force=True)  # what menu 10 > 1 does after its warning
     sync()
     assert sorted(world.playlist) == sorted(f"spotify:track:vid{n:08d}" for n in range(1, 6))
+
+
+def test_import_csv_forgets_which_source_the_old_data_came_from(world: FakeWorld,
+                                                                home: Path) -> None:
+    sync()
+    assert cfg.ENRICHED_SOURCE.exists()
+    cfg.ENRICHED_CSV.unlink()  # deleted by hand; import-csv then needs no --force
+    export = home / "export.csv"
+    export.write_text("title,artist\nA,B\n", encoding="utf-8")
+    import_csv(csv=str(export))
+    assert not cfg.ENRICHED_SOURCE.exists()

@@ -424,7 +424,7 @@ def step_yt_playlist(state: SetupState) -> bool:
 
 # Per-playlist sync state; likes data, debug stats and playlist names are kept
 def _playlist_data_files() -> list[Path]:
-    files = [cfg.UNMATCHED_CSV, cfg.SKIPPED_CSV, cfg.MATCH_CACHE]
+    files = [cfg.UNMATCHED_CSV, cfg.SKIPPED_CSV, cfg.MATCH_CACHE, cfg.ENRICHED_SOURCE]
     if cfg.SNAPSHOTS_DIR.is_dir():
         files += sorted(cfg.SNAPSHOTS_DIR.glob("*.json"))
     # The matches go last, so a locked file earlier never strands them

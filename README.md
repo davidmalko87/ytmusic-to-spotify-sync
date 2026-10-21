@@ -314,8 +314,19 @@ Unmatched tracks are written to `data/unmatched.csv` and can be retried later wi
 
 `sync` exits with code 1 when the Spotify playlist cannot be opened or is not yours (checked
 before any search), or when matched tracks could not be added or removed tracks could not be
-taken off Spotify. Nothing is lost: the next sync retries them. A rate limit or `Ctrl+C` during
-matching still exits 0 with progress saved.
+taken off Spotify, including a long rate limit or a network error while it adds or removes them.
+Nothing is lost: the next sync retries them. A rate limit or `Ctrl+C` during matching still
+exits 0 with progress saved, and so does a rate limit in the metadata backfill after the push
+(the next sync fetches the rest).
+
+Removals are only applied against the source the sync data came from. After switching
+`YTMUSIC_PLAYLIST_ID` (by hand, or in the menu without archiving), the first sync of the new
+source removes nothing from Spotify, even if `snapshot` ran in between; removals start with its
+second sync. `data/enriched_source.json` records which source `playlist_enriched.csv` belongs to.
+
+Matches found by a run that was stopped before they reached Spotify are kept in
+`data/match_cache.json` and added by the next sync. If that file cannot be read, it is renamed to
+`match_cache.json.bad` with a warning; run `repush` once so nothing it held is missing.
 
 ---
 
@@ -503,6 +514,8 @@ ytmusic-to-spotify-sync/
     ├── playlist_enriched.csv  # Full enriched output (+ playlist_enriched.json copy)
     ├── exports/               # YT Music exports (export-yt)
     ├── review.csv             # Low-confidence matches worth a manual check
+    ├── match_cache.json       # Matches of a stopped run not yet added to Spotify
+    ├── enriched_source.json   # Which source playlist_enriched.csv was synced from
     └── unmatched.csv          # Tracks that could not be matched
 ```
 

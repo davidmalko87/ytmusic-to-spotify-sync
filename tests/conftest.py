@@ -41,6 +41,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(cfg, "UNMATCHED_CSV", data / "unmatched.csv")
     monkeypatch.setattr(cfg, "SKIPPED_CSV", data / "skipped.csv")
     monkeypatch.setattr(cfg, "MATCH_CACHE", data / "match_cache.json")
+    monkeypatch.setattr(cfg, "ENRICHED_SOURCE", data / "enriched_source.json")
     monkeypatch.setattr(cfg, "REVIEW_CSV", data / "review.csv")
     monkeypatch.setattr(cfg, "LIKES_SNAPSHOTS_DIR", data / "snapshots" / "likes")
     monkeypatch.setattr(cfg, "LIKES_ENRICHED_CSV", data / "likes_enriched.csv")
@@ -67,6 +68,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             "LIKES_ENRICHED_CSV": data / "likes_enriched.csv",
             "LIKES_UNMATCHED_CSV": data / "likes_unmatched.csv",
             "MATCH_CACHE": data / "match_cache.json",
+            "ENRICHED_SOURCE": data / "enriched_source.json",
             "REVIEW_CSV": data / "review.csv",
             "SKIPPED_CSV": data / "skipped.csv",
             "SNAPSHOTS_DIR": data / "snapshots",

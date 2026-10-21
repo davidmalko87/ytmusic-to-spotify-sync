@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import requests
+import spotipy
 from spotipy.exceptions import SpotifyOauthError
 
 from playlist_sync import cli, matcher
@@ -23,7 +25,7 @@ from playlist_sync import config as cfg
 from playlist_sync.csv_manager import read_enriched_csv
 from playlist_sync.models import MatchResult, Track
 from playlist_sync.spotify_client import RateLimitError
-from tests.test_sync import FakeWorld, sync, yt_track
+from tests.test_sync import YT_ID, FakeWorld, sync, yt_track
 
 URI = "spotify:track:vid{:08d}".format
 
@@ -74,13 +76,29 @@ def test_snapshot_command_does_not_swallow_a_removal(world: FakeWorld) -> None:
     assert URI(1) not in world.playlist
 
 
-def test_source_switch_after_snapshot_still_removes_nothing(world: FakeWorld, home) -> None:
+def test_source_switch_after_snapshot_still_removes_nothing(world: FakeWorld) -> None:
     sync()
-    export = home / "other.csv"
-    export.write_text("title,artist,album,trackId,platform\nNew,Someone,Alb,vid00000099,ytmusic\n",
-                      encoding="utf-8")
-    sync(from_csv=str(export))
+    # A hand edit of .env (or the CLI) switches the source, then 'snapshot' runs:
+    # the snapshot is now of the new playlist, the CSV still of the old one
+    cfg.save_setting("YTMUSIC_PLAYLIST_ID", "PLanotherPlaylist123")
+    world.yt = [yt_track(n) for n in range(11, 14)]
+    run("snapshot")
+    sync()
     assert world.removed == []
+    assert all(URI(n) in world.playlist for n in range(1, 6))
+    world.yt = world.yt[1:]  # removals on the new source work from its second sync on
+    sync()
+    assert world.removed == [URI(11)]
+
+
+def test_switching_back_to_the_synced_source_still_removes(world: FakeWorld) -> None:
+    sync()
+    cfg.save_setting("YTMUSIC_PLAYLIST_ID", "PLanotherPlaylist123")
+    run("snapshot")  # snapshot of another playlist; the CSV still belongs to the first
+    cfg.save_setting("YTMUSIC_PLAYLIST_ID", YT_ID)
+    world.yt = world.yt[1:]
+    sync()
+    assert world.removed == [URI(1)]
 
 
 # -- ME-M-3: two YT entries, one Spotify track ----------------------------------
@@ -333,3 +351,120 @@ def test_token_refresh_failure_is_a_clean_exit_1(world: FakeWorld, monkeypatch, 
     with pytest.raises(SystemExit) as stop:
         sync()
     assert stop.value.code == 1 and "log in to Spotify again" in capsys.readouterr().out
+
+
+# -- #2 / #13 / #35: a failed final push or removal exits 1 ----------------------
+
+@pytest.mark.parametrize("error", [requests.exceptions.ConnectionError("reset"),
+                                   spotipy.SpotifyException(502, -1, "bad gateway")])
+def test_network_error_on_the_push_exits_1_and_keeps_the_matches(world: FakeWorld,
+                                                                   error) -> None:
+    world.push_error = error
+    with pytest.raises(SystemExit) as stop:
+        sync()
+    assert stop.value.code == 1 and len(read_enriched_csv()) == 5
+    world.push_error = None
+    sync()
+    assert sorted(world.playlist) == [URI(n) for n in range(1, 6)]
+
+
+def test_network_error_on_the_removal_exits_1_and_is_retried(world: FakeWorld,
+                                                              monkeypatch) -> None:
+    sync()
+    world.yt = world.yt[1:]
+
+    def unreachable(sp, pid, uris, dry_run=False):
+        raise requests.exceptions.ReadTimeout("read timed out")
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist", unreachable)
+    with pytest.raises(SystemExit) as stop:
+        sync()
+    assert stop.value.code == 1
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist", world._remove)
+    sync()
+    assert URI(1) not in world.playlist
+
+
+# -- #3 / #14: Ctrl+C, then the push fails too ------------------------------------
+
+def test_ctrl_c_then_a_failed_push_still_saves_progress(world: FakeWorld, capsys) -> None:
+    world.fail_on_match, world.fail_with = 4, KeyboardInterrupt()
+    world.push_error = requests.exceptions.ConnectionError("network is down")
+    sync()  # no traceback
+    assert "the next sync adds the rest" in capsys.readouterr().out
+    assert len(read_enriched_csv()) == 5 and cfg.MATCH_CACHE.exists()
+    world.fail_on_match, world.push_error = None, None
+    calls = world.match_calls
+    sync()
+    assert sorted(world.playlist) == [URI(n) for n in range(1, 6)]
+    assert world.match_calls == calls + 2  # the 3 matches were not searched again
+
+
+# -- #4: unpushed cache entries of tracks deleted meanwhile ----------------------
+
+def test_killed_run_does_not_push_a_track_deleted_since(world: FakeWorld) -> None:
+    # A run killed after the periodic cache save: 5 matches, none pushed, no CSV
+    cache = {yt_track(n).fingerprint: {"matched": True, "spotify_uri": URI(n), "pushed": False}
+             for n in range(1, 6)}
+    cfg.MATCH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    cfg.MATCH_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+    world.yt = [t for t in world.yt if t.track_id != "vid00000003"]  # deleted on YT Music
+    sync()
+    assert URI(3) not in world.playlist
+    assert sorted(world.playlist) == [URI(n) for n in (1, 2, 4, 5)]
+
+
+# -- #5: the match cache is the only record of unpushed matches -------------------
+
+def test_corrupt_match_cache_is_set_aside_with_a_repush_hint(world: FakeWorld, capsys) -> None:
+    cfg.MATCH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    cfg.MATCH_CACHE.write_text('{"half-written', encoding="utf-8")
+    sync()
+    out = capsys.readouterr().out
+    assert "repush" in out and "match_cache.json.bad" in out
+    assert cfg.MATCH_CACHE.with_name("match_cache.json.bad").exists()
+
+
+def test_resume_message_no_longer_suggests_deleting_the_cache(world: FakeWorld,
+                                                              capsys) -> None:
+    world.push_error = RateLimitError(7200)
+    with pytest.raises(SystemExit):
+        sync()
+    world.push_error = None
+    capsys.readouterr()
+    sync()
+    out = capsys.readouterr().out
+    assert "Resuming" in out and "delete" not in out
+
+
+# -- #7: a removal that went through although it reported a failure -------------
+
+def test_removed_track_re_added_after_a_timed_out_removal_is_pushed(world: FakeWorld,
+                                                                     monkeypatch) -> None:
+    sync()
+    world.yt = world.yt[1:]
+
+    def removes_then_times_out(sp, pid, uris, dry_run=False):
+        world._remove(sp, pid, uris)  # Spotify applied it, the answer was lost
+        raise requests.exceptions.ReadTimeout("read timed out")
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist", removes_then_times_out)
+    with pytest.raises(SystemExit):
+        sync()
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist", world._remove)
+    world.yt = [yt_track(1)] + world.yt  # song 1 liked again on YT Music
+    sync()
+    assert URI(1) in world.playlist
+
+
+# -- #12: the Spotify backfill after the push ------------------------------------
+
+def test_long_rate_limit_in_the_backfill_still_saves_everything(world: FakeWorld,
+                                                                 monkeypatch) -> None:
+    def banned(sp, tracks):
+        raise RateLimitError(7200)
+    monkeypatch.setattr(cli, "backfill_track_metadata", banned)
+    sync()
+    assert len(world.playlist) == 5 and len(read_enriched_csv()) == 5
+    assert (cfg.SNAPSHOTS_DIR / "latest.json").exists() and not cfg.MATCH_CACHE.exists()
+    calls = world.match_calls
+    sync()
+    assert world.match_calls == calls  # nothing searched again

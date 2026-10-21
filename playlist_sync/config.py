@@ -137,6 +137,10 @@ SEARCH_DELAY_SEC = 1.5
 # Match cache file for resuming after rate limits
 MATCH_CACHE = DATA_DIR / "match_cache.json"
 
+# Which source (snapshot ID) sync last wrote the enriched CSV from; removals
+# are only computed against rows of the same source
+ENRICHED_SOURCE = DATA_DIR / "enriched_source.json"
+
 
 # Template values shipped in .env.example, e.g. "your_playlist_id_here".
 _PLACEHOLDER_RE = re.compile(r"^your_[a-z0-9_]*_here$", re.IGNORECASE)

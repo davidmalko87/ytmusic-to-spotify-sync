@@ -134,8 +134,12 @@ def read_enriched_csv(path: Path | None = None) -> list[Track]:
     return tracks
 
 
-def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
-    """Write DataFrame to CSV with fallback on PermissionError (e.g. file open in Excel)."""
+def _safe_csv_write(df: pd.DataFrame, path: Path) -> bool:
+    """Write DataFrame to CSV with fallback on PermissionError (e.g. file open in Excel).
+
+    Returns False when the data went to the fallback file, so the real path
+    still holds the old contents.
+    """
     try:
         df.to_csv(path, index=False, encoding="utf-8-sig")
     except PermissionError:
@@ -143,6 +147,8 @@ def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
         df.to_csv(fallback, index=False, encoding="utf-8-sig")
         logger.warning("Could not write to %s (file locked). Saved to: %s", path, fallback)
         print(f"WARNING: {path.name} is locked (open in Excel?). Saved to: {fallback.name}")
+        return False
+    return True
 
 
 def write_tracks_json(tracks: list[Track], path: Path) -> Path:
@@ -161,14 +167,18 @@ def write_tracks_json(tracks: list[Track], path: Path) -> Path:
     return path
 
 
-def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> None:
-    """Write tracks to the enriched CSV and a JSON copy beside it (same name, .json)."""
+def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> bool:
+    """Write tracks to the enriched CSV and a JSON copy beside it (same name, .json).
+
+    Returns False when the CSV was locked and went to a fallback file instead.
+    """
     path = path or ENRICHED_CSV
     path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = [t.to_csv_row() for t in tracks]
     df = pd.DataFrame(rows, columns=ENRICHED_COLUMNS)
-    _safe_csv_write(df, path)
+    if not _safe_csv_write(df, path):
+        return False
     logger.info("Wrote %d tracks to enriched CSV: %s", len(tracks), path)
 
     # The JSON copy is a convenience: a failure must not lose the sync result
@@ -179,6 +189,7 @@ def write_enriched_csv(tracks: list[Track], path: Path | None = None) -> None:
     except OSError as e:
         logger.warning("Could not write JSON copy %s: %s", json_path, e)
         print(f"WARNING: could not write {json_path.name} ({e}); the CSV is up to date.")
+    return True
 
 
 def write_unmatched_csv(tracks: list[Track], path: Path | None = None) -> None:
