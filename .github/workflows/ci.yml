@@ -70,6 +70,10 @@ jobs:
           python -m pip install build "twine>=6.1"
           python -m build
           python -m twine check --strict dist/*
+          # MANIFEST.in prunes tests/: they need the repo checkout to run
+          if tar tzf dist/*.tar.gz | grep -q '^[^/]*/tests/'; then
+            echo "::error::the sdist ships tests/"; exit 1
+          fi
 
       - name: Install the wheel in a clean venv and run it outside the repo
         shell: bash

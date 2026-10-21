@@ -263,3 +263,22 @@ def test_remaster_suffix_is_not_sent_to_review(monkeypatch) -> None:
     track = Track(title="Song", artist="Band", duration=200.0)
     result = best(track, [cand("Song - 2015 Remaster", ["Band"], 201)], monkeypatch)
     assert result.matched and result.confidence >= cfg.REVIEW_CONFIDENCE
+
+
+# -- #29: a report file open in Excel -------------------------------------------
+
+def test_open_review_csv_does_not_crash_the_sync(world: FakeWorld, monkeypatch, capsys) -> None:
+    cfg.REVIEW_CSV.parent.mkdir(parents=True, exist_ok=True)
+    cfg.REVIEW_CSV.write_text("stale\n", encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def locked(self: Path, missing_ok: bool = False) -> None:
+        if self.name == "review.csv":
+            raise PermissionError(32, "being used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    sync()  # no low-confidence match: review.csv is due for deletion
+    out = capsys.readouterr().out
+    assert "review.csv is open in another program" in out and "Sync complete!" in out
+    assert (cfg.SNAPSHOTS_DIR / "latest.json").exists()

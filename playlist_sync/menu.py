@@ -1083,10 +1083,8 @@ def action_csv() -> None:
             if not confirm("Import anyway? (the current data is archived, not deleted)",
                            default=False):
                 return
-            archived = archive_playlist_data("before-csv-import")
-            if archived:
-                ok(f"Current sync data moved to {archived}")
-        run_command("import-csv")
+        # --force archives the old data only after the CSV was read without error
+        run_command("import-csv", force=True)
     elif answer == "2":
         if not ensure_ready(("spotify_app", "spotify_playlist")):
             return

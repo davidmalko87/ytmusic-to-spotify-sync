@@ -37,7 +37,7 @@ def write_review_csv(tracks: list[Track], path: Path | None = None) -> None:
     """
     path = path or REVIEW_CSV
     if not tracks:
-        path.unlink(missing_ok=True)
+        remove_report(path)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
@@ -60,13 +60,44 @@ def write_review_csv(tracks: list[Track], path: Path | None = None) -> None:
     logger.info("Wrote %d low-confidence matches to: %s", len(tracks), path)
 
 
+def remove_report(path: Path) -> None:
+    """Delete a report file that is no longer needed; a locked one only gets a warning.
+
+    Reports are meant to be opened in a spreadsheet, and Windows refuses to
+    delete an open file: that must not stop the sync after its real work.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Could not delete %s: %s", path, e)
+        print(f"WARNING: {path.name} is open in another program and is out of date; close it.")
+
+
 class CsvFormatError(ValueError):
     """A CSV cell the tool cannot read; the message names the file, row and value."""
 
 
+REQUIRED_COLUMNS = ("title", "artist")
+
+
 def _tracks_from_csv(path: Path) -> list[Track]:
     """Parse every row; a bad cell becomes a CsvFormatError that names its row."""
-    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
+    try:
+        # Excel saves CSVs with ';' in many locales; ',' would read one big column
+        with path.open(encoding="utf-8-sig", errors="replace") as fh:
+            first_line = fh.readline()
+        sep = ";" if first_line.count(";") > first_line.count(",") else ","
+        df = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False, sep=sep)
+    except UnicodeDecodeError as e:
+        raise CsvFormatError(f"{path.name} is not a UTF-8 CSV ({e}); save it again as "
+                             "'CSV UTF-8' and run the command again") from e
+    except (pd.errors.ParserError, pd.errors.EmptyDataError) as e:
+        raise CsvFormatError(f"{path.name} is not a readable CSV ({e})") from e
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        found = ", ".join(map(str, df.columns)) or "none"
+        raise CsvFormatError(f"{path.name} has no {' or '.join(missing)} column "
+                             f"(columns found: {found})")
     tracks: list[Track] = []
     # Spreadsheet numbering: row 1 is the header, so the first track is row 2
     for row_number, (_, row) in enumerate(df.iterrows(), start=2):
@@ -117,7 +148,8 @@ def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
 def write_tracks_json(tracks: list[Track], path: Path) -> Path:
     """Write tracks as {exported_at, track_count, tracks: [...]} JSON.
 
-    Same fields as the CSV, but typed: numbers, true/false, and null for empty cells.
+    Same fields as the CSV, but typed: numbers and true/false; null for an empty
+    number or an unknown explicit flag, an empty flag is false, empty text stays "".
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {

@@ -237,6 +237,12 @@ ytmusic-sync repush --dry-run              # preview without pushing
 ytmusic-sync status                        # settings folder, match rate, snapshots
 ```
 
+CSV exports (`import-csv`, `sync --from-csv`) need a `title` and an `artist` column; `album`,
+`duration` (seconds or `m:ss`), `isrc`, `trackId` and `platform` are used when present. Files
+Excel saved with `;` as the separator are read as such. Save the file as "CSV UTF-8": another
+encoding, a missing column or a bad cell stops the command with the file and row named, before
+anything is changed.
+
 All commands accept `--verbose` / `-v` (before the command) for debug-level log output, e.g.
 `ytmusic-sync -v sync`. For cron/Jenkins, set `PLAYLIST_SYNC_HOME` so the job always uses the same
 settings folder:
@@ -300,7 +306,9 @@ track is missing from Spotify's results.
 
 Fuzzy matches (passes 2 and 3) below confidence 0.75 are still added to Spotify and also listed
 in `data/review.csv`, lowest first, with both links, so you can check them by hand. The file is
-rebuilt on every sync and removed when nothing needs a look.
+rebuilt on every sync and removed when nothing needs a look. If it (or `unmatched.csv`,
+`likes_unmatched.csv`) is still open in a spreadsheet then, the sync only warns that the open copy
+is out of date.
 
 Unmatched tracks are written to `data/unmatched.csv` and can be retried later with `retry-unmatched`.
 

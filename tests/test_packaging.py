@@ -11,6 +11,7 @@ catch the same mistakes earlier, on every matrix leg, without building anything.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -112,3 +113,30 @@ def test_bug_template_asks_for_the_cli_version() -> None:
     text = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
     assert "ytmusic-sync --version" in text
     assert "import playlist_sync" not in text
+
+
+# -- #37: the sdist leaves the test suite out ----------------------------------
+
+def test_sdist_ships_the_package_without_the_test_suite(tmp_path: Path) -> None:
+    setuptools = pytest.importorskip("setuptools")
+    if int(setuptools.__version__.split(".")[0]) < 77:
+        pytest.skip("the SPDX license field needs setuptools >= 77")
+    import tarfile
+
+    # Build from a copy: setuptools writes an egg-info folder next to pyproject.toml
+    source = tmp_path / "src"
+    shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(
+        ".git", "data", "dist", "build", "*.egg-info", "__pycache__", ".*_cache", ".env",
+        "browser.json"))
+    out = tmp_path / "dist"
+    result = subprocess.run(
+        [sys.executable, "-c",
+         f"from setuptools import build_meta; build_meta.build_sdist({str(out)!r})"],
+        capture_output=True, text=True, cwd=source, timeout=300, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    (sdist,) = out.glob("*.tar.gz")
+    with tarfile.open(sdist) as tar:
+        names = [n.split("/", 1)[1] for n in tar.getnames() if "/" in n]
+    assert "playlist_sync/cli.py" in names and "MANIFEST.in" in names
+    assert not [n for n in names if n.startswith("tests")]

@@ -203,3 +203,47 @@ def test_status_with_working_source_csv_counts_tracks(
     src.write_text("title,artist,duration\nA,B,3:45\nC,D,200\n", encoding="utf-8")
     cfg.save_setting("SOURCE_CSV", str(src))
     assert "2 tracks (export.csv)" in _status(monkeypatch, capsys)
+
+
+# -- #30 / #32: Excel-saved CSVs -----------------------------------------------
+
+def test_semicolon_csv_is_read_column_by_column(tmp_path: Path) -> None:
+    path = tmp_path / "excel-eu.csv"
+    path.write_text("title;artist;duration\nYesterday;The Beatles;2:05\n", encoding="utf-8-sig")
+    (track,) = read_source_csv(path)
+    assert (track.title, track.artist, track.duration) == ("Yesterday", "The Beatles", 125.0)
+
+
+def test_csv_without_title_or_artist_column_names_the_columns_found(tmp_path: Path) -> None:
+    path = tmp_path / "renamed.csv"
+    path.write_text("Song,Band\nYesterday,The Beatles\n", encoding="utf-8")
+    with pytest.raises(CsvFormatError, match=r"no title or artist column .*Song, Band"):
+        read_source_csv(path)
+
+
+def test_ansi_csv_is_a_format_error_not_a_traceback(tmp_path: Path) -> None:
+    path = tmp_path / "ansi.csv"
+    path.write_bytes("title,artist\nГруппа крови,Кино\n".encode("cp1251"))
+    with pytest.raises(CsvFormatError, match="CSV UTF-8"):
+        read_source_csv(path)
+
+
+def test_import_csv_of_a_semicolon_file_keeps_titles(home: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: None)
+    export = home / "export.csv"
+    export.write_text("title;artist\nA;B\n", encoding="utf-8")
+    cli.dispatch(argparse.Namespace(command="import-csv", verbose=False, dry_run=False,
+                                    csv=str(export), force=False))
+    assert [(t.title, t.artist) for t in read_enriched_csv()] == [("A", "B")]
+
+
+def test_import_csv_without_artist_column_stops_before_writing(
+        home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: None)
+    export = home / "export.csv"
+    export.write_text("name\nA\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as stop:
+        cli.dispatch(argparse.Namespace(command="import-csv", verbose=False, dry_run=False,
+                                        csv=str(export), force=False))
+    assert stop.value.code == 1 and not cfg.ENRICHED_CSV.exists()

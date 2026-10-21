@@ -16,7 +16,8 @@ _CLOCK_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d{1,2}(?:\.\d+)?)$")
 
 # JSON types of the numeric and yes/no columns; every other column is text.
 # to_json_dict converts to_csv_row's cells, so the JSON copy rounds like the
-# CSV and is null exactly where the CSV cell is empty.
+# CSV. An empty number (or an unknown explicit flag) is null, an empty flag is
+# false, and empty text stays "".
 _JSON_INT_COLUMNS = frozenset({
     "spotify_duration_ms", "key", "mode", "time_signature", "popularity", "track_number",
     "lastfm_playcount", "lastfm_listeners",
@@ -198,7 +199,7 @@ class Track:
         }
 
     def to_json_dict(self) -> dict[str, str | int | float | bool | None]:
-        """The CSV row with JSON types: numbers, true/false, and null where the CSV is empty."""
+        """The CSV row with JSON types: numbers, true/false, null for an empty number."""
         typed: dict[str, str | int | float | bool | None] = {}
         for column, text in self.to_csv_row().items():
             if column in _JSON_BOOL_COLUMNS:

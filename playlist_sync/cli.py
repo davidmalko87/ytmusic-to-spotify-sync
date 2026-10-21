@@ -45,6 +45,7 @@ from playlist_sync.csv_manager import (
     CsvFormatError,
     read_enriched_csv,
     read_source_csv,
+    remove_report,
     write_enriched_csv,
     write_review_csv,
     write_skipped_csv,
@@ -939,8 +940,8 @@ def cmd_retry_unmatched(args: argparse.Namespace) -> None:
     if still_unmatched:
         write_unmatched_csv(still_unmatched)
     elif UNMATCHED_CSV.exists():
-        UNMATCHED_CSV.unlink()
-        print("All tracks matched! Removed unmatched.csv")
+        remove_report(UNMATCHED_CSV)
+        print("All tracks matched!")
     if not pushed:
         print("Matches are saved; the next sync adds the missing ones to Spotify.")
         sys.exit(1)
@@ -1459,8 +1460,8 @@ def cmd_sync_likes(args: argparse.Namespace) -> None:
             write_unmatched_csv(still_unmatched, path=LIKES_UNMATCHED_CSV)
             print(f"Unmatched likes saved: {LIKES_UNMATCHED_CSV} ({len(still_unmatched)} total; "
                   f"retry with '{cli_command()} sync-likes --retry-unmatched')")
-        elif LIKES_UNMATCHED_CSV.exists():
-            LIKES_UNMATCHED_CSV.unlink()
+        else:
+            remove_report(LIKES_UNMATCHED_CSV)
         save_likes_snapshot(current + held_back)
         print("Likes snapshot updated.")
 

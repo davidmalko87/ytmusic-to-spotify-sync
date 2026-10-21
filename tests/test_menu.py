@@ -354,8 +354,23 @@ def test_csv_import_over_existing_matches_needs_confirmation(
 
     keyboard(["1", "y"])
     menu.action_csv()
-    assert [a.command for a in fakes["dispatched"]] == ["import-csv"]
-    assert list((cfg.DATA_DIR / "archive").glob("before-csv-import-*"))
+    # import-csv --force reads the CSV first and archives only after that
+    assert [(a.command, a.force) for a in fakes["dispatched"]] == [("import-csv", True)]
+
+
+def test_menu_csv_import_of_an_unreadable_csv_keeps_the_sync_data(
+    keyboard: Callable[[list[str]], list[str]], monkeypatch: pytest.MonkeyPatch, home: Path,
+) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: None)
+    export = home / "export.csv"
+    export.write_text("title,artist,duration\nx,y,soon\n", encoding="utf-8")  # bad cell
+    cfg.save_setting("SOURCE_CSV", str(export))
+    _seed_sync_data(home)
+    before = cfg.ENRICHED_CSV.read_bytes()
+    keyboard(["1", "y"])
+    menu.action_csv()
+    assert cfg.ENRICHED_CSV.read_bytes() == before
+    assert not (cfg.DATA_DIR / "archive").exists()
 
 
 def test_pasted_spotify_playlist_owned_by_someone_else_is_refused(
