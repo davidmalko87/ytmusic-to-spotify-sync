@@ -468,3 +468,75 @@ def test_long_rate_limit_in_the_backfill_still_saves_everything(world: FakeWorld
     calls = world.match_calls
     sync()
     assert world.match_calls == calls  # nothing searched again
+
+
+# -- second review: 0.7 data, local files, ranking, remaster notes ----------------
+
+def test_0_7_data_switched_then_snapshotted_removes_nothing(world: FakeWorld) -> None:
+    from playlist_sync.csv_manager import write_enriched_csv
+    from playlist_sync.ytmusic_client import save_snapshot
+
+    rows = [yt_track(n) for n in range(1, 6)]
+    for t in rows:
+        t.spotify_uri, t.match_attempted = URI(int(t.track_id[3:])), True
+    write_enriched_csv(rows)  # 0.7: no enriched_source.json, untagged snapshot
+    save_snapshot(rows)
+    world.playlist = [t.spotify_uri for t in rows]
+    cfg.save_setting("YTMUSIC_PLAYLIST_ID", "PLanotherPlaylist123")
+    world.yt = [yt_track(n) for n in range(11, 14)]
+    run("snapshot")
+    sync()
+    assert world.removed == []
+
+
+def test_repush_replace_leaves_local_files_alone_and_refills(world: FakeWorld,
+                                                             monkeypatch) -> None:
+    sync()
+    local = "spotify:local:Artist:Album:Own+Recording:215"
+    world.playlist += [URI(1), local]  # a duplicate to clean, and a local file
+    monkeypatch.setattr(cli, "get_playlist_tracks", lambda sp, pid: [
+        {"uri": u, "is_local": u.startswith("spotify:local:")} for u in world.playlist])
+    run("repush", replace=True)
+    assert local not in world.removed
+    assert sorted(u for u in world.playlist if u != local) == [URI(n) for n in range(1, 6)]
+
+
+def test_repush_replace_after_a_partial_wipe_adds_only_what_is_missing(world: FakeWorld,
+                                                                       monkeypatch) -> None:
+    sync()
+    world.playlist += [URI(1)]
+
+    def wipes_all_but_one(sp, pid, uris, dry_run=False):
+        world._remove(sp, pid, uris[1:])
+        return len(uris) - 1
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist", wipes_all_but_one)
+    with pytest.raises(SystemExit) as stop:
+        run("repush", replace=True)
+    assert stop.value.code == 1
+    # Refilled, and nothing doubled: only the URI that could not be removed
+    # keeps the duplicate it already had
+    assert sorted(world.playlist) == [URI(1), URI(1)] + [URI(n) for n in range(2, 6)]
+
+
+def test_the_review_cap_does_not_let_a_live_take_win(monkeypatch) -> None:
+    track = Track(title="Love Me Do", artist="The Beatles", duration=142.0)
+    right = cand("Love Me Do - Mono / Remastered", ["The Beatles"], 141)
+    result = best(track, [cand("Love Me Do - Live", ["The Beatles"], 150), right], monkeypatch)
+    assert result.spotify_uri == right["uri"]
+
+
+@pytest.mark.parametrize("name", ["Help! - Remastered Version", "Help! - 2009 Digital Remaster",
+                                  "Help! - Mono / Remastered"])
+def test_remaster_notes_are_not_sent_to_review(name: str, monkeypatch) -> None:
+    track = Track(title="Help!", artist="The Beatles", duration=140.0)
+    result = best(track, [cand(name, ["The Beatles"], 139)], monkeypatch)
+    assert result.matched and result.confidence >= cfg.REVIEW_CONFIDENCE
+
+
+def test_spotify_error_hint_names_the_token_file(world: FakeWorld, monkeypatch, capsys) -> None:
+    def refuse(config: dict) -> object:
+        raise SpotifyOauthError("error: invalid_grant")
+    monkeypatch.setattr(cli, "get_spotify_client", refuse)
+    with pytest.raises(SystemExit):
+        sync()
+    assert str(cfg.SPOTIFY_TOKEN_CACHE) in capsys.readouterr().out

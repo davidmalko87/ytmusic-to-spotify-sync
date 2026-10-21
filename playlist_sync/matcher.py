@@ -125,7 +125,10 @@ def _other_alphabet(source_artist: str, candidate: dict) -> bool:
 
 # Suffixes that name the same recording; anything else stripped to pass the
 # title check (Remix, Part 2, Live, Acoustic) may be another version
-_SAME_RECORDING_RE = re.compile(r"remaster(?:ed)?|mono|stereo|\d{4}|[-–()\[\]\s.,]")
+_SAME_RECORDING_RE = re.compile(
+    r"\b(?:digital(?:ly)?|remaster(?:ed)?|version|edition|deluxe|mono|stereo|radio|edit|single"
+    r"|album|original|mix|\d{4})\b|[-–()\[\]\s.,/&+:]"
+)
 
 
 def _only_bare_title_passes(source_title: str, candidate: dict) -> bool:
@@ -154,7 +157,7 @@ def _guard(track: Track, candidate: dict) -> str:
     if _artist_similarity(track.artist, candidate) >= MIN_ARTIST_SIMILARITY:
         # A remix or "Part 2" passes only through the suffix-free comparison:
         # accept it, but list it for a manual check
-        return "review" if _only_bare_title_passes(track.title, candidate) else "ok"
+        return "review_title" if _only_bare_title_passes(track.title, candidate) else "ok"
     # Artist names in different alphabets (Cyrillic vs Latin): only an exact
     # title with a matching duration gets through, and it goes to review.csv
     if known and diff_sec <= DURATION_TOLERANCE_SEC and \
@@ -185,6 +188,7 @@ def _best_candidate(
     """The highest-scoring candidate that passes the guards, and its score."""
     best_score = 0.0
     best_candidate = None
+    best_verdict = ""
     for candidate in results:
         verdict = _guard(track, candidate)
         if verdict == "reject":
@@ -197,8 +201,11 @@ def _best_candidate(
         if verdict == "review":
             score = min(score, REVIEW_CONFIDENCE - 0.01)
         if score > best_score:
-            best_score = score
-            best_candidate = candidate
+            best_score, best_candidate, best_verdict = score, candidate, verdict
+    # A suffix-only title match is flagged after the ranking, so the cap never
+    # lets another version (a live take) beat the right one
+    if best_verdict == "review_title":
+        best_score = min(best_score, REVIEW_CONFIDENCE - 0.01)
     return best_candidate, best_score
 
 

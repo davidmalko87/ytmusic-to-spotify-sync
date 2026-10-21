@@ -314,7 +314,7 @@ def test_likes_missing_from_the_csv_get_rows_and_their_unlike_is_mirrored(
     assert likes.searched[searches:] == ["vid00000002"]  # no URI known: searched once
 
 
-def test_locked_likes_csv_does_not_advance_the_snapshot(likes: FakeLikes, monkeypatch) -> None:
+def lock_likes_csv(monkeypatch) -> None:
     from playlist_sync import csv_manager
 
     real_to_csv = csv_manager.pd.DataFrame.to_csv
@@ -324,8 +324,31 @@ def test_locked_likes_csv_does_not_advance_the_snapshot(likes: FakeLikes, monkey
             raise PermissionError(13, "locked")
         return real_to_csv(self, path, *a, **k)
     monkeypatch.setattr(csv_manager.pd.DataFrame, "to_csv", locked)
+
+
+def test_locked_likes_csv_leaves_new_likes_for_the_next_run(likes: FakeLikes,
+                                                           monkeypatch) -> None:
+    with monkeypatch.context() as m:
+        lock_likes_csv(m)
+        with pytest.raises(SystemExit) as stop:
+            sync_likes()
+        assert stop.value.code == 1  # the CSV did not get this run's rows
     sync_likes()
-    assert not (cfg.LIKES_SNAPSHOTS_DIR / "latest.json").exists()
+    assert sorted(likes_rows()) == ["vid00000001", "vid00000002", "vid00000003"]
+
+
+def test_relike_after_an_unsave_with_the_csv_locked_is_saved_again(likes: FakeLikes,
+                                                                    monkeypatch) -> None:
+    sync_likes()
+    likes.yt = likes.yt[1:]  # un-like song 1 while likes_enriched.csv is open in Excel
+    with monkeypatch.context() as m:
+        lock_likes_csv(m)
+        with pytest.raises(SystemExit):
+            sync_likes()
+    assert likes.unsaved == ["vid00000001"]
+    likes.yt = [like(1)] + likes.yt  # liked again, Excel closed
+    sync_likes()
+    assert "vid00000001" in likes.saved
 
 
 # -- #27: unsave the URI sync-likes saved -------------------------------------------
@@ -375,3 +398,47 @@ def test_open_likes_unmatched_csv_does_not_stop_the_snapshot(likes: FakeLikes,
     assert "vid00000002" in likes.saved
     snapshot = (cfg.LIKES_SNAPSHOTS_DIR / "latest.json").read_text(encoding="utf-8")
     assert "vid00000002" in snapshot
+
+
+# -- second review: un-likes, Ctrl+C while writing, recovered 0.7 likes ---------
+
+def test_unlike_of_a_like_that_was_never_saved_unsaves_nothing(likes: FakeLikes) -> None:
+    video = like(9)
+    video.album = ""  # a liked music video: skipped, never saved
+    likes.yt.append(video)
+    likes.unmatchable = {"vid00000002"}
+    sync_likes()
+    likes.saved += ["vid00000009", "vid00000002"]  # liked on Spotify by the user directly
+    searches = len(likes.searched)
+    likes.yt = [likes.yt[0], likes.yt[2]]  # un-like song 2 and the video
+    sync_likes()
+    assert likes.unsaved == [] and len(likes.searched) == searches
+
+
+def test_ctrl_c_while_saving_keeps_the_run(likes: FakeLikes, monkeypatch) -> None:
+    def interrupted(sp, ids, dry_run=False, failed=None):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli, "add_saved_tracks", interrupted)
+    try:
+        sync_likes()
+    except KeyboardInterrupt:  # a real one would abort the whole pytest session
+        pytest.fail("Ctrl+C while saving escaped as a traceback")
+    assert len(likes_rows()) == 3
+    monkeypatch.setattr(cli, "add_saved_tracks", likes._save)
+    searches = len(likes.searched)
+    sync_likes()
+    assert sorted(likes.saved) == ["vid00000001", "vid00000002", "vid00000003"]
+    assert len(likes.searched) == searches  # saved from the kept rows
+
+
+def test_recovered_0_7_like_with_a_playlist_match_is_saved(likes: FakeLikes) -> None:
+    likes.unmatchable = {"vid00000002"}
+    sync_likes()  # song 2: no match, never saved
+    # 0.7 overwrote likes_enriched.csv with the last run only; the playlist sync
+    # matched song 2 meanwhile
+    write_enriched_csv([likes_rows()["vid00000003"]], cfg.DATA_DIR / "likes_enriched.csv")
+    playlist_row = like(2)
+    playlist_row.spotify_uri, playlist_row.match_attempted = "spotify:track:vid00000002", True
+    write_enriched_csv([playlist_row])
+    sync_likes()
+    assert "vid00000002" in likes.saved

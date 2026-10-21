@@ -292,8 +292,10 @@ Before scoring, passes 2 and 3 drop every candidate that fails a hard check. Thi
 same-title songs by other artists, other songs by the same artist and much longer versions:
 
 - the title must be at least 60 % similar (version suffixes such as ` - 2015 Remaster` or
-  `(Live)` are ignored for this). A match that passes only once a suffix other than a remaster
-  note is ignored (` - Extended Remix`, `(Part 2)`, `(Live)`) gets a confidence below 0.75;
+  `(Live)` are ignored for this). A match that passes only once a suffix is ignored gets a
+  confidence below 0.75 when that suffix names another version (` - Extended Remix`, `(Part 2)`,
+  `(Live)`); remaster, mono, edition and radio-edit notes do not count. The best candidate is
+  chosen first, so this flag never lets another version win;
 - when both durations are known, they may differ by 15 s at most;
 - one of the track's artists must be at least 60 % similar to one of the Spotify artists. An
   artist written in another alphabet (`Zemfira` / `Земфира`) still passes when the title is
@@ -323,6 +325,8 @@ Removals are only applied against the source the sync data came from. After swit
 `YTMUSIC_PLAYLIST_ID` (by hand, or in the menu without archiving), the first sync of the new
 source removes nothing from Spotify, even if `snapshot` ran in between; removals start with its
 second sync. `data/enriched_source.json` records which source `playlist_enriched.csv` belongs to.
+Data from 0.7 has no such record yet: its first 0.8 sync removes only tracks the snapshot of the
+current source also lists, as 0.7 did.
 
 Matches found by a run that was stopped before they reached Spotify are kept in
 `data/match_cache.json` and added by the next sync. If that file cannot be read, it is renamed to
@@ -405,7 +409,7 @@ Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state nev
 
 All your likes are fetched (no 10,000 cap). If a large share of them suddenly disappears from YT Music's answer — more than 50 and more than 20 % of the last run — nothing is unsaved: that is far more likely an incomplete answer than a real mass un-like. Run `sync-likes --force` (or answer yes in the menu) if you really un-liked them. The menu's yes covers only the likes it listed: if YT Music's next answer lacks even more, those are held back again.
 
-Un-liking a song unsaves the Spotify track `sync-likes` saved for it (the playlist sync's match is only a fallback), and nothing is unsaved while another current like still maps to the same Spotify track (a song and its music video, say). An un-like whose Spotify track is unknown is searched once.
+Un-liking a song unsaves the Spotify track `sync-likes` saved for it (the playlist sync's match is only a fallback), and nothing is unsaved while another current like still maps to the same Spotify track (a song and its music video, say). An un-like whose Spotify track is unknown is searched once, unless it was searched before without a match or skipped (a video without album), since nothing was saved for it then.
 
 Nothing is written off on errors: a like whose save failed is saved by the next run (without a new search), an unsave that failed is retried, and a failed search skips only that like (five in a row, a rate limit or `Ctrl+C` stop the run, keeping its matches). `sync-likes` exits with code 1 when Spotify refused saves or unsaves or stopped answering while it wrote them.
 
@@ -421,8 +425,9 @@ ytmusic-sync repush --dry-run   # preview the push
 
 Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks, and a
 Spotify track two YT Music entries match is added once. `repush` exits with code 1 when tracks could not
-be added, or Spotify stopped answering; with `--replace` it adds nothing when the playlist could not be
-emptied completely, so a failed wipe never doubles the playlist.
+be added, or Spotify stopped answering. With `--replace`, a wipe that fails partway adds only what the
+playlist still lacks (it never doubles the playlist) and exits 1. Local files in the playlist are
+left in place: the API cannot remove them.
 
 ### JSON copies
 
