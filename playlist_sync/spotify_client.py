@@ -19,6 +19,7 @@ import requests
 import spotipy
 from requests.adapters import HTTPAdapter
 from spotipy.cache_handler import CacheFileHandler
+from spotipy.exceptions import SpotifyOauthError
 from spotipy.oauth2 import SpotifyOAuth
 from tqdm import tqdm
 from urllib3.util.retry import Retry
@@ -238,6 +239,10 @@ def search_track(
             return []
         except requests.exceptions.RequestException as e:  # timeouts, DNS, resets
             raise SearchUnavailable(f"could not reach Spotify ({e})") from e
+        except SpotifyOauthError as e:
+            # The hourly token refresh failed (accounts.spotify.com down or
+            # rate-limited): no search happened, so this is not "no match"
+            raise SearchUnavailable(f"could not refresh the Spotify login ({e})") from e
 
     # Still rate-limited after three short waits: stop like a long ban, progress kept
     raise RateLimitError(last_wait)
@@ -279,52 +284,72 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict]:
     return tracks
 
 
+def _is_server_failure(e: spotipy.SpotifyException) -> bool:
+    """A 5xx, or spotipy's header-less 429 that stands for 5xx retries used up."""
+    return (e.http_status == 429 and not e.headers) or e.http_status >= 500
+
+
+def _lookup_in_batches(
+    call, ids: list[str], key: str, desc: str, failed: set[str] | None,
+) -> dict[str, dict]:
+    """Fetch objects for ids 50 at a time; {id: object} for every one Spotify returned.
+
+    Server trouble stops the loop at once (no 61 s sleep per batch during an
+    outage) and puts the ids not fetched into failed, so the caller can leave
+    them for the next run. A long rate limit raises RateLimitError.
+    """
+    results: dict[str, dict] = {}
+    consecutive_403s = 0
+    total_batches = math.ceil(len(ids) / 50)
+    for i in tqdm(range(0, len(ids), 50), desc=desc, unit="batch", total=total_batches):
+        batch = ids[i:i + 50]
+        time.sleep(SEARCH_DELAY_SEC)
+        for attempt in range(2):
+            try:
+                response = call(batch)
+            except spotipy.SpotifyException as e:
+                if _is_real_rate_limit(e) and attempt == 0:
+                    _handle_rate_limit(e)  # sleeps a short wait, raises for a long one
+                    continue
+                if e.http_status == 429 or _is_server_failure(e):
+                    logger.warning("Spotify /%s failed at offset %d (HTTP %s); "
+                                   "%d left for the next run", key, i, e.http_status, len(ids) - i)
+                    if failed is not None:
+                        failed.update(ids[i:])
+                    return results
+                if e.http_status == 403:
+                    consecutive_403s += 1
+                else:
+                    consecutive_403s = 0
+                    logger.warning("Failed to fetch %s batch at offset %d: %s", key, i, e)
+                break
+            for item in response.get(key, []):
+                if item:
+                    results[item["id"]] = item
+            consecutive_403s = 0
+            break
+        if consecutive_403s >= 3:
+            logger.warning(
+                "/%s endpoint returned 403 three times in a row. "
+                "Spotify has restricted this endpoint for your app type. Skipping.", key,
+            )
+            break
+    return results
+
+
 def get_tracks_batch(
     sp: spotipy.Spotify,
     track_ids: list[str],
+    failed: set[str] | None = None,
 ) -> dict[str, dict]:
     """Fetch full track objects for multiple tracks in batches of 50.
 
     Returns {track_id: track_dict} for successfully fetched tracks.
     Uses the /tracks endpoint which supports up to 50 IDs per call.
-    Stops early if the endpoint returns 403 (restricted in Dev Mode).
+    Stops early if the endpoint returns 403 (restricted in Dev Mode), and on
+    server trouble, adding the ids not fetched to failed.
     """
-    results: dict[str, dict] = {}
-    total_batches = math.ceil(len(track_ids) / 50)
-    consecutive_403s = 0
-
-    for i in tqdm(range(0, len(track_ids), 50), desc="Metadata", unit="batch", total=total_batches):
-        batch = track_ids[i:i + 50]
-        time.sleep(SEARCH_DELAY_SEC)
-        try:
-            response = sp.tracks(batch)
-            for track in response.get("tracks", []):
-                if track:
-                    results[track["id"]] = track
-            consecutive_403s = 0
-        except spotipy.SpotifyException as e:
-            if e.http_status == 403:
-                consecutive_403s += 1
-                if consecutive_403s >= 3:
-                    logger.warning(
-                        "/tracks endpoint returned 403 three times in a row. "
-                        "Spotify has restricted this endpoint for your app type. Skipping."
-                    )
-                    break
-            elif e.http_status == 429:
-                consecutive_403s = 0
-                _handle_rate_limit(e)
-                try:
-                    response = sp.tracks(batch)
-                    for track in response.get("tracks", []):
-                        if track:
-                            results[track["id"]] = track
-                except spotipy.SpotifyException:
-                    logger.warning("Failed to fetch tracks batch at offset %d after retry", i)
-            else:
-                consecutive_403s = 0
-                logger.warning("Failed to fetch tracks batch at offset %d: %s", i, e)
-
+    results = _lookup_in_batches(sp.tracks, track_ids, "tracks", "Metadata", failed)
     logger.info("Fetched metadata for %d/%d tracks", len(results), len(track_ids))
     return results
 
@@ -332,47 +357,14 @@ def get_tracks_batch(
 def get_artists_batch(
     sp: spotipy.Spotify,
     artist_ids: list[str],
+    failed: set[str] | None = None,
 ) -> dict[str, dict]:
     """Fetch artist objects in batches of 50. Returns {artist_id: artist_dict}.
 
     Each artist dict includes 'genres' (list of strings) and other metadata.
+    Server trouble stops early and adds the ids not fetched to failed.
     """
-    results: dict[str, dict] = {}
-    total_batches = math.ceil(len(artist_ids) / 50)
-    consecutive_403s = 0
-
-    for i in tqdm(range(0, len(artist_ids), 50), desc="Artists", unit="batch", total=total_batches):
-        batch = artist_ids[i:i + 50]
-        time.sleep(SEARCH_DELAY_SEC)
-        try:
-            response = sp.artists(batch)
-            for artist in response.get("artists", []):
-                if artist:
-                    results[artist["id"]] = artist
-            consecutive_403s = 0
-        except spotipy.SpotifyException as e:
-            if e.http_status == 403:
-                consecutive_403s += 1
-                if consecutive_403s >= 3:
-                    logger.warning(
-                        "/artists endpoint returned 403 three times in a row. "
-                        "Spotify has restricted this endpoint for your app type. Skipping."
-                    )
-                    break
-            elif e.http_status == 429:
-                consecutive_403s = 0
-                _handle_rate_limit(e)
-                try:
-                    response = sp.artists(batch)
-                    for artist in response.get("artists", []):
-                        if artist:
-                            results[artist["id"]] = artist
-                except spotipy.SpotifyException:
-                    logger.warning("Failed to fetch artists batch at offset %d after retry", i)
-            else:
-                consecutive_403s = 0
-                logger.warning("Failed to fetch artists batch at offset %d: %s", i, e)
-
+    results = _lookup_in_batches(sp.artists, artist_ids, "artists", "Artists", failed)
     logger.info("Fetched genre data for %d/%d artists", len(results), len(artist_ids))
     return results
 
@@ -527,8 +519,12 @@ def add_saved_tracks(
     sp: spotipy.Spotify,
     track_ids: list[str],
     dry_run: bool = False,
+    failed: list[str] | None = None,
 ) -> int:
-    """Add tracks to the user's Liked Songs in batches of 50."""
+    """Add tracks to the user's Liked Songs in batches of 50; failed gets the ids not saved.
+
+    A long rate limit raises RateLimitError; network errors propagate.
+    """
     if not track_ids:
         return 0
 
@@ -539,22 +535,12 @@ def add_saved_tracks(
     added = 0
     for i in range(0, len(track_ids), SPOTIFY_SAVED_TRACKS_BATCH):
         batch = track_ids[i:i + SPOTIFY_SAVED_TRACKS_BATCH]
-        try:
-            sp.current_user_saved_tracks_add(batch)
+        if _with_rate_limit_retry(lambda b=batch: sp.current_user_saved_tracks_add(b),
+                                  f"save batch at offset {i}"):
             added += len(batch)
             logger.debug("Saved batch of %d tracks (%d/%d)", len(batch), added, len(track_ids))
-        except spotipy.SpotifyException as e:
-            if e.http_status == 429:
-                _handle_rate_limit(e)
-                # retry this batch once
-                try:
-                    sp.current_user_saved_tracks_add(batch)
-                    added += len(batch)
-                    continue
-                except spotipy.SpotifyException as e2:
-                    logger.error("Retry failed for batch at offset %d: %s", i, e2)
-            else:
-                logger.error("Failed to save batch at offset %d: %s", i, e)
+        elif failed is not None:
+            failed.extend(batch)
 
     logger.info("Added %d/%d tracks to Spotify library", added, len(track_ids))
     return added
@@ -564,8 +550,12 @@ def remove_saved_tracks(
     sp: spotipy.Spotify,
     track_ids: list[str],
     dry_run: bool = False,
+    failed: list[str] | None = None,
 ) -> int:
-    """Remove tracks from the user's Liked Songs in batches of 50."""
+    """Remove tracks from the user's Liked Songs in batches of 50; failed gets the ids kept.
+
+    A long rate limit raises RateLimitError; network errors propagate.
+    """
     if not track_ids:
         return 0
 
@@ -576,11 +566,11 @@ def remove_saved_tracks(
     removed = 0
     for i in range(0, len(track_ids), SPOTIFY_SAVED_TRACKS_BATCH):
         batch = track_ids[i:i + SPOTIFY_SAVED_TRACKS_BATCH]
-        try:
-            sp.current_user_saved_tracks_delete(batch)
+        if _with_rate_limit_retry(lambda b=batch: sp.current_user_saved_tracks_delete(b),
+                                  f"unsave batch at offset {i}"):
             removed += len(batch)
-        except spotipy.SpotifyException as e:
-            logger.error("Failed to unsave batch at offset %d: %s", i, e)
+        elif failed is not None:
+            failed.extend(batch)
 
     logger.info("Removed %d/%d tracks from Spotify library", removed, len(track_ids))
     return removed

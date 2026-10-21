@@ -404,7 +404,10 @@ ytmusic-sync repush --replace   # empty the playlist first, then add (cleans dup
 ytmusic-sync repush --dry-run   # preview the push
 ```
 
-Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks.
+Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks, and a
+Spotify track two YT Music entries match is added once. `repush` exits with code 1 when tracks could not
+be added, or Spotify stopped answering; with `--replace` it adds nothing when the playlist could not be
+emptied completely, so a failed wipe never doubles the playlist.
 
 ### JSON copies
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import requests
 import spotipy
+from spotipy.exceptions import SpotifyBaseException
 from tqdm import tqdm
 
 from playlist_sync import __version__
@@ -290,6 +291,9 @@ def _require_editable_playlist(sp: object, config: dict[str, str]) -> None:
         print(f"Error: Spotify cannot open the target playlist {playlist_id} "
               f"(HTTP {e.http_status}).")
         print_setup_hint("pick the Spotify playlist again")
+        sys.exit(1)
+    except SpotifyBaseException as e:  # SpotifyOauthError: the login could not be refreshed
+        print(f"Error: could not log in to Spotify ({e}). Nothing was changed; try again later.")
         sys.exit(1)
     if not access["can_edit"]:
         print(f"Error: the Spotify playlist '{access['name']}' belongs to someone else, "
@@ -1119,20 +1123,36 @@ def cmd_repush(args: argparse.Namespace) -> None:
         print("No matched tracks found. Nothing to push.")
         return
 
-    desired_uris = [t.spotify_uri for t in matched if t.spotify_uri]
+    # Two YT Music entries can match one Spotify track: add it once
+    desired_uris = list(dict.fromkeys(t.spotify_uri for t in matched if t.spotify_uri))
     print(f"Target playlist: {config['SPOTIFY_PLAYLIST_ID']}")
 
     sp = get_spotify_client(config)
+    try:
+        _repush(sp, config, args, matched, desired_uris)
+    except (RateLimitError, requests.exceptions.RequestException, SpotifyBaseException) as e:
+        print(f"\nSpotify stopped accepting changes ({e}). Run repush again later; "
+              "it only adds what the playlist still lacks.")
+        sys.exit(1)
 
+
+def _count_playlist_uris(sp: object, playlist_id: str) -> tuple[int, dict[str, int]]:
+    """(entries, {uri: copies}) of the playlist as Spotify has it now."""
+    entries = get_playlist_tracks(sp, playlist_id)
+    counts: dict[str, int] = {}
+    for t in entries:
+        if t and t.get("uri"):
+            counts[t["uri"]] = counts.get(t["uri"], 0) + 1
+    return len(entries), counts
+
+
+def _repush(sp: object, config: dict[str, str], args: argparse.Namespace,
+            matched: list[Track], desired_uris: list[str]) -> None:
+    """The Spotify part of cmd_repush; exits 1 when tracks could not be added or removed."""
     # Fetch what's currently in the playlist so we can be idempotent.
     print("Reading current playlist contents...")
-    from playlist_sync.spotify_client import get_playlist_tracks
-    current_tracks = get_playlist_tracks(sp, config["SPOTIFY_PLAYLIST_ID"])
-    current_uri_counts: dict[str, int] = {}
-    for t in current_tracks:
-        if t and t.get("uri"):
-            current_uri_counts[t["uri"]] = current_uri_counts.get(t["uri"], 0) + 1
-    print(f"Currently in playlist: {len(current_tracks)} entries ({len(current_uri_counts)} unique URIs)")
+    entries, current_uri_counts = _count_playlist_uris(sp, config["SPOTIFY_PLAYLIST_ID"])
+    print(f"Currently in playlist: {entries} entries ({len(current_uri_counts)} unique URIs)")
 
     replace_mode = getattr(args, "replace", False)
 
@@ -1142,15 +1162,21 @@ def cmd_repush(args: argparse.Namespace) -> None:
     if replace_mode or has_dupes:
         if has_dupes and not replace_mode:
             print(
-                f"Detected duplicates in the playlist ({len(current_tracks) - len(current_uri_counts)} extras). "
+                f"Detected duplicates in the playlist ({entries - len(current_uri_counts)} extras). "
                 "Pass --replace to wipe the playlist first; otherwise idempotent add will leave duplicates as-is."
             )
-        if replace_mode and current_tracks:
+        if replace_mode and entries:
             print(f"--replace: removing all {len(current_uri_counts)} unique URIs from the playlist...")
             if args.dry_run:
                 print(f"[DRY RUN] Would remove {len(current_uri_counts)} URIs and add {len(desired_uris)}")
                 return
-            remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], list(current_uri_counts.keys()))
+            removed = remove_tracks_from_playlist(sp, config["SPOTIFY_PLAYLIST_ID"],
+                                                  list(current_uri_counts.keys()))
+            if removed < len(current_uri_counts):
+                # Adding everything on top of what is left would double those tracks
+                print(f"Error: {len(current_uri_counts) - removed} track(s) could not be removed, "
+                      "so nothing was added. Run 'repush --replace' again later.")
+                sys.exit(1)
             current_uri_counts = {}
 
     # Idempotent add: only push URIs that aren't already in the playlist
@@ -1175,7 +1201,8 @@ def cmd_repush(args: argparse.Namespace) -> None:
     added = add_tracks_to_playlist(sp, config["SPOTIFY_PLAYLIST_ID"], to_add)
     print(f"\nDone! Added {added}/{len(to_add)} tracks to the Spotify playlist.")
     if added < len(to_add):
-        print(f"  ({len(to_add) - added} failed — check the log for details.)")
+        print(f"  ({len(to_add) - added} failed — check the log for details, then run repush again.)")
+        sys.exit(1)
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -1676,6 +1703,14 @@ def dispatch(args: argparse.Namespace) -> None:
             # A hand-made or Excel-saved CSV: name the cell instead of a traceback
             print(f"Error: {e}")
             print("Fix that cell and run the command again (duration is seconds or m:ss).")
+            sys.exit(1)
+        except SpotifyBaseException as e:
+            # Usually a failed token refresh (SpotifyOauthError) or an answer no
+            # command handled: a clear message for cron instead of a traceback
+            logger.debug("Spotify error in %s", args.command, exc_info=True)
+            print(f"Error: Spotify refused the request ({e}).")
+            print("Try again later. If it keeps failing, log in to Spotify again "
+                  "(menu C > Spotify app keys).")
             sys.exit(1)
 
 

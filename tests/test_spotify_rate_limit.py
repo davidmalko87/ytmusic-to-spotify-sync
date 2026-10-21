@@ -49,7 +49,7 @@ class FakeSpotifyServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            do_GET = do_POST = do_DELETE = _answer
+            do_GET = do_POST = do_PUT = do_DELETE = _answer
 
             def log_message(self, *args: object) -> None:
                 pass
@@ -133,3 +133,97 @@ def test_playlist_write_raises_on_a_long_ban(server: FakeSpotifyServer) -> None:
     server.script = [(429, {"Retry-After": "86400"}, RATE_LIMITED)]
     with pytest.raises(sc.RateLimitError):
         sc.add_tracks_to_playlist(server.client(), "pl", ["spotify:track:1"])
+
+
+# -- #17: server trouble in the metadata and genre lookups ----------------------
+
+class FailingLookups:
+    """A spotipy client whose /tracks and /artists answer like a Spotify outage."""
+
+    def __init__(self, error: spotipy.SpotifyException) -> None:
+        self.error, self.calls = error, 0
+
+    def tracks(self, ids: list[str]) -> dict:
+        self.calls += 1
+        raise self.error
+
+    artists = tracks
+
+
+MAX_RETRIES = spotipy.SpotifyException(429, -1, "Max Retries", headers=None)
+
+
+@pytest.mark.parametrize("error", [MAX_RETRIES, spotipy.SpotifyException(502, -1, "bad gateway")])
+def test_outage_stops_the_lookup_without_sleeping(error, monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr(sc, "SEARCH_DELAY_SEC", 0)
+    monkeypatch.setattr(sc.time, "sleep", slept.append)
+    sp = FailingLookups(error)
+    failed: set[str] = set()
+    ids = [f"id{n}" for n in range(120)]  # three batches
+    assert sc.get_tracks_batch(sp, ids, failed=failed) == {}
+    assert sp.calls == 1 and failed == set(ids)
+    assert not any(slept)  # no 61 s wait per batch
+
+
+def test_metadata_lost_to_an_outage_is_retried_next_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from playlist_sync import enricher
+    from playlist_sync.models import Track
+
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
+    rows = [Track(title="A", artist="B", spotify_uri=f"spotify:track:id{n}") for n in range(3)]
+    enricher.backfill_track_metadata(FailingLookups(MAX_RETRIES), rows)
+    enricher.backfill_artist_genres(FailingLookups(MAX_RETRIES), rows)
+    assert not any(t.spotify_metadata_attempted or t.spotify_genres_attempted for t in rows)
+
+
+def test_a_403_lockout_is_still_recorded_as_attempted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from playlist_sync import enricher
+    from playlist_sync.models import Track
+
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
+    rows = [Track(title="A", artist="B", spotify_uri="spotify:track:id1")]
+    enricher.backfill_track_metadata(FailingLookups(spotipy.SpotifyException(403, -1, "no")), rows)
+    assert rows[0].spotify_metadata_attempted
+
+
+# -- #19 / G3: token refresh, Liked Songs writes ---------------------------------
+
+def test_failed_token_refresh_during_search_is_unavailable(monkeypatch) -> None:
+    from spotipy.exceptions import SpotifyOauthError
+
+    class RefreshFails:
+        def search(self, **kwargs: object) -> dict:
+            raise SpotifyOauthError("error: server_error")
+
+    monkeypatch.setattr(sc, "SEARCH_DELAY_SEC", 0)
+    with pytest.raises(sc.SearchUnavailable):
+        sc.search_track(RefreshFails(), "song")
+
+
+def test_saved_tracks_write_reports_the_ids_it_could_not_save(monkeypatch) -> None:
+    class Outage:
+        def current_user_saved_tracks_add(self, ids: list[str]) -> None:
+            raise MAX_RETRIES
+
+    slept: list[float] = []
+    monkeypatch.setattr(sc.time, "sleep", slept.append)
+    failed: list[str] = []
+    assert sc.add_saved_tracks(Outage(), ["a", "b"], failed=failed) == 0
+    assert failed == ["a", "b"] and slept == []
+
+
+def test_saved_tracks_write_waits_out_a_short_429(server: FakeSpotifyServer, monkeypatch) -> None:
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
+    server.script = [(429, {"Retry-After": "1"}, RATE_LIMITED), (200, {}, {})]
+    failed: list[str] = []
+    assert sc.add_saved_tracks(server.client(), ["a"], failed=failed) == 1
+    assert failed == [] and server.hits == 2
+
+
+def test_unsave_waits_out_a_short_429(server: FakeSpotifyServer, monkeypatch) -> None:
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
+    server.script = [(429, {"Retry-After": "1"}, RATE_LIMITED), (200, {}, {})]
+    failed: list[str] = []
+    assert sc.remove_saved_tracks(server.client(), ["a"], failed=failed) == 1
+    assert failed == []

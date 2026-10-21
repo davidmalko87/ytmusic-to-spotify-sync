@@ -16,11 +16,13 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from spotipy.exceptions import SpotifyOauthError
 
 from playlist_sync import cli, matcher
 from playlist_sync import config as cfg
 from playlist_sync.csv_manager import read_enriched_csv
 from playlist_sync.models import MatchResult, Track
+from playlist_sync.spotify_client import RateLimitError
 from tests.test_sync import FakeWorld, sync, yt_track
 
 URI = "spotify:track:vid{:08d}".format
@@ -282,3 +284,52 @@ def test_open_review_csv_does_not_crash_the_sync(world: FakeWorld, monkeypatch, 
     out = capsys.readouterr().out
     assert "review.csv is open in another program" in out and "Sync complete!" in out
     assert (cfg.SNAPSHOTS_DIR / "latest.json").exists()
+
+
+# -- #6 / #8 / #9 / #15: repush --------------------------------------------------
+
+def test_repush_adds_a_shared_spotify_track_once(world: FakeWorld, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "match_track", shared_match)
+    sync()
+    world.playlist = []  # the user recreated the Spotify playlist
+    run("repush", replace=False)
+    assert world.playlist.count("spotify:track:SHARED") == 1 and len(world.playlist) == 4
+
+
+def test_repush_replace_adds_nothing_when_the_wipe_failed(world: FakeWorld, monkeypatch) -> None:
+    sync()
+    world.playlist += [URI(1), URI(2)]  # duplicates to clean
+    monkeypatch.setattr(cli, "remove_tracks_from_playlist",
+                        lambda sp, pid, uris, dry_run=False: len(uris) - 2)
+    with pytest.raises(SystemExit) as stop:
+        run("repush", replace=True)
+    assert stop.value.code == 1 and len(world.playlist) == 7  # nothing added on top
+
+
+def test_repush_exits_1_when_tracks_could_not_be_added(world: FakeWorld, monkeypatch) -> None:
+    sync()
+    world.playlist = []
+    monkeypatch.setattr(cli, "add_tracks_to_playlist", lambda sp, pid, uris, dry_run=False: 0)
+    with pytest.raises(SystemExit) as stop:
+        run("repush", replace=False)
+    assert stop.value.code == 1
+
+
+def test_repush_rate_limit_is_a_clean_exit_1(world: FakeWorld, capsys) -> None:
+    sync()
+    world.playlist = []
+    world.push_error = RateLimitError(7200)
+    with pytest.raises(SystemExit) as stop:
+        run("repush", replace=False)
+    assert stop.value.code == 1 and "Run repush again later" in capsys.readouterr().out
+
+
+# -- #19: a failed token refresh -------------------------------------------------
+
+def test_token_refresh_failure_is_a_clean_exit_1(world: FakeWorld, monkeypatch, capsys) -> None:
+    def refuse(config: dict) -> object:
+        raise SpotifyOauthError("error: server_error")
+    monkeypatch.setattr(cli, "get_spotify_client", refuse)
+    with pytest.raises(SystemExit) as stop:
+        sync()
+    assert stop.value.code == 1 and "log in to Spotify again" in capsys.readouterr().out
