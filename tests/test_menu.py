@@ -354,8 +354,23 @@ def test_csv_import_over_existing_matches_needs_confirmation(
 
     keyboard(["1", "y"])
     menu.action_csv()
-    assert [a.command for a in fakes["dispatched"]] == ["import-csv"]
-    assert list((cfg.DATA_DIR / "archive").glob("before-csv-import-*"))
+    # import-csv --force reads the CSV first and archives only after that
+    assert [(a.command, a.force) for a in fakes["dispatched"]] == [("import-csv", True)]
+
+
+def test_menu_csv_import_of_an_unreadable_csv_keeps_the_sync_data(
+    keyboard: Callable[[list[str]], list[str]], monkeypatch: pytest.MonkeyPatch, home: Path,
+) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: None)
+    export = home / "export.csv"
+    export.write_text("title,artist,duration\nx,y,soon\n", encoding="utf-8")  # bad cell
+    cfg.save_setting("SOURCE_CSV", str(export))
+    _seed_sync_data(home)
+    before = cfg.ENRICHED_CSV.read_bytes()
+    keyboard(["1", "y"])
+    menu.action_csv()
+    assert cfg.ENRICHED_CSV.read_bytes() == before
+    assert not (cfg.DATA_DIR / "archive").exists()
 
 
 def test_pasted_spotify_playlist_owned_by_someone_else_is_refused(
@@ -456,3 +471,35 @@ def test_clean_path_unescapes_macos_drag_and_drop() -> None:
 ])
 def test_local_redirect_detection(uri: str, local: bool) -> None:
     assert menu._local_redirect(uri) is local
+
+
+def test_likes_retry_is_offered_only_when_likes_failed_before(
+    keyboard: Callable[[list[str]], list[str]], fakes: dict[str, list],
+) -> None:
+    keyboard([""])  # real run; no likes_unmatched.csv -> no retry question
+    menu.action_likes()
+    keyboard(["", "y"])
+    cfg.LIKES_UNMATCHED_CSV.parent.mkdir(parents=True, exist_ok=True)
+    cfg.LIKES_UNMATCHED_CSV.write_text("title,artist\nx,y\n", encoding="utf-8")
+    menu.action_likes()
+    assert [a.retry_unmatched for a in fakes["dispatched"]] == [False, True]
+
+
+def test_held_back_unsaves_need_a_yes_in_the_menu(
+    keyboard: Callable[[list[str]], list[str]], monkeypatch: pytest.MonkeyPatch,
+    fakes: dict[str, list],
+) -> None:
+    runs: list[argparse.Namespace] = []
+
+    def dispatch(args: argparse.Namespace) -> None:
+        runs.append(args)
+        if not args.force:
+            args.held_back, args.held_back_fps = 120, ["fp1", "fp2"]
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    keyboard(["", ""])  # real run; Enter = no
+    menu.action_likes()
+    keyboard(["", "y"])
+    menu.action_likes()
+    assert [a.force for a in runs] == [False, False, True]
+    assert runs[-1].confirmed_fps == ["fp1", "fp2"]  # only what the user was shown

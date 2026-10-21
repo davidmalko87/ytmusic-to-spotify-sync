@@ -367,11 +367,14 @@ def backfill_track_metadata(
             track_id_map[sp_id] = t
 
     logger.info("Backfilling Spotify metadata for %d tracks...", len(track_id_map))
-    sp_tracks = get_tracks_batch(sp, list(track_id_map.keys()))
+    not_fetched: set[str] = set()
+    sp_tracks = get_tracks_batch(sp, list(track_id_map.keys()), failed=not_fetched)
 
-    # Mark all attempted so we skip them on future runs even if /tracks 403'd
+    # Mark attempted so we skip them on future runs even if /tracks 403'd; a
+    # batch lost to server trouble is left for the next run
     for t in needs_backfill:
-        t.spotify_metadata_attempted = True
+        if t.spotify_uri.split(":")[-1] not in not_fetched:
+            t.spotify_metadata_attempted = True
 
     enriched_count = 0
     for sp_id, sp_data in sp_tracks.items():
@@ -416,10 +419,6 @@ def backfill_artist_genres(
         logger.info("All matched tracks already have artist genres or were attempted")
         return tracks
 
-    # Mark attempted up-front so a 403 lockout doesn't re-trigger next run
-    for t in needs_genres:
-        t.spotify_genres_attempted = True
-
     # We need artist IDs — get them from the track URIs via /tracks endpoint.
     # Build a map of spotify_track_id -> list of Track objects (for fan-out).
     track_id_to_tracks: dict[str, list[Track]] = {}
@@ -429,7 +428,8 @@ def backfill_artist_genres(
             track_id_to_tracks.setdefault(sp_id, []).append(t)
 
     logger.info("Fetching track data for %d tracks to extract artist IDs...", len(track_id_to_tracks))
-    sp_tracks = get_tracks_batch(sp, list(track_id_to_tracks.keys()))
+    tracks_not_fetched: set[str] = set()
+    sp_tracks = get_tracks_batch(sp, list(track_id_to_tracks.keys()), failed=tracks_not_fetched)
 
     # Collect unique artist IDs and map artist_id -> set of Tracks
     artist_id_to_tracks: dict[str, list[Track]] = {}
@@ -442,12 +442,22 @@ def backfill_artist_genres(
                 for t in track_id_to_tracks[sp_id]:
                     artist_id_to_tracks.setdefault(primary_artist_id, []).append(t)
 
-    if not artist_id_to_tracks:
+    artists_not_fetched: set[str] = set()
+    if artist_id_to_tracks:
+        logger.info("Fetching genres for %d unique artists...", len(artist_id_to_tracks))
+        artist_data = get_artists_batch(sp, list(artist_id_to_tracks.keys()),
+                                        failed=artists_not_fetched)
+    else:
         logger.info("No artist IDs found to fetch genres")
-        return tracks
+        artist_data = {}
 
-    logger.info("Fetching genres for %d unique artists...", len(artist_id_to_tracks))
-    artist_data = get_artists_batch(sp, list(artist_id_to_tracks.keys()))
+    # Attempted means Spotify answered (data, nothing, or a 403 lockout); a
+    # lookup lost to server trouble is left for the next run
+    retry_later = {id(t) for sp_id in tracks_not_fetched for t in track_id_to_tracks[sp_id]}
+    retry_later |= {id(t) for a in artists_not_fetched for t in artist_id_to_tracks[a]}
+    for t in needs_genres:
+        if id(t) not in retry_later:
+            t.spotify_genres_attempted = True
 
     enriched_count = 0
     for artist_id, artist_info in artist_data.items():

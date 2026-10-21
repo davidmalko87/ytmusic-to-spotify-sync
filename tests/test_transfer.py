@@ -245,3 +245,10 @@ def test_account_wide_refusal_stops_instead_of_blaming_every_track(yt: FakeYT) -
         yt_transfer.import_to_playlist("auth", sorted(yt.refuse), target_id="PLmine",
                                        say=lambda text: None)
     assert len(yt.add_calls) == 3  # one batch, then two singles - not 20 requests
+
+
+def test_typed_enriched_json_is_still_importable(home: Path) -> None:
+    write_enriched_csv([_track(1), _track(2)])
+    json_copy = cfg.ENRICHED_CSV.with_suffix(".json")
+    _, ids, without_id = yt_transfer.collect_source("unused", str(json_copy))
+    assert ids == ["vid00000001", "vid00000002"] and without_id == 0

@@ -512,7 +512,9 @@ def fetch_liked_tracks(auth_file: str) -> list[Track]:
     logger.info("Fetching YT Music liked songs")
     # `get_liked_songs` returns the same shape as `get_playlist`
     try:
-        playlist = ytm.get_liked_songs(limit=10000)
+        # limit=None pages to the end: a fixed cap drops the oldest likes of a big
+        # library, and sync-likes would then unsave them on Spotify
+        playlist = ytm.get_liked_songs(limit=None)
     except KeyError as e:
         # ytmusicapi raises a bare KeyError for the missing renderer key
         if "twoColumnBrowseResultsRenderer" in str(e):

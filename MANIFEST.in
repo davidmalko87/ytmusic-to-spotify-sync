@@ -1,0 +1,3 @@
+# The sdist ships the package and its docs; the test suite needs the repo
+# checkout (conftest, the repo script, .github) and stays out of it
+prune tests

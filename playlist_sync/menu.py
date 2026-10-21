@@ -424,7 +424,7 @@ def step_yt_playlist(state: SetupState) -> bool:
 
 # Per-playlist sync state; likes data, debug stats and playlist names are kept
 def _playlist_data_files() -> list[Path]:
-    files = [cfg.UNMATCHED_CSV, cfg.SKIPPED_CSV, cfg.MATCH_CACHE]
+    files = [cfg.UNMATCHED_CSV, cfg.SKIPPED_CSV, cfg.MATCH_CACHE, cfg.ENRICHED_SOURCE]
     if cfg.SNAPSHOTS_DIR.is_dir():
         files += sorted(cfg.SNAPSHOTS_DIR.glob("*.json"))
     # The matches go last, so a locked file earlier never strands them
@@ -914,8 +914,8 @@ def change_setting() -> None:
 
 # -- Actions ------------------------------------------------------------------
 
-def run_command(command: str, **options: object) -> None:
-    """Run a CLI command handler with menu-chosen options."""
+def run_command(command: str, **options: object) -> argparse.Namespace:
+    """Run a CLI command handler with menu-chosen options; returns its args (results ride on them)."""
     from playlist_sync.cli import dispatch
 
     args = argparse.Namespace(
@@ -929,6 +929,7 @@ def run_command(command: str, **options: object) -> None:
         dispatch(args)
     except SystemExit:
         pass  # handlers print their own error before exiting
+    return args
 
 
 def ask_run_mode(what: str) -> bool | None:
@@ -1000,8 +1001,19 @@ def action_preview() -> None:
 
 def action_likes() -> None:
     dry_run = ask_run_mode("Copy new YT Music likes to Spotify 'Liked Songs'")
-    if dry_run is not None:
-        run_command("sync-likes", dry_run=dry_run)
+    if dry_run is None:
+        return
+    retry = cfg.LIKES_UNMATCHED_CSV.is_file() and confirm(
+        "Also search Spotify again for likes that did not match before?", default=False,
+    )
+    args = run_command("sync-likes", dry_run=dry_run, retry_unmatched=retry)
+    held_back = getattr(args, "held_back", 0)
+    if held_back and confirm(
+        f"Unsave those {held_back} track(s) from Spotify Liked Songs anyway?", default=False,
+    ):
+        # Only the likes listed: a fresh answer that lacks more is held back again
+        run_command("sync-likes", dry_run=dry_run, force=True,
+                    confirmed_fps=getattr(args, "held_back_fps", None))
 
 
 def action_status() -> None:
@@ -1073,10 +1085,8 @@ def action_csv() -> None:
             if not confirm("Import anyway? (the current data is archived, not deleted)",
                            default=False):
                 return
-            archived = archive_playlist_data("before-csv-import")
-            if archived:
-                ok(f"Current sync data moved to {archived}")
-        run_command("import-csv")
+        # --force archives the old data only after the CSV was read without error
+        run_command("import-csv", force=True)
     elif answer == "2":
         if not ensure_ready(("spotify_app", "spotify_playlist")):
             return

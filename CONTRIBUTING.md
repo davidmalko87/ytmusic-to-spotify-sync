@@ -43,7 +43,8 @@ This project follows [semver](https://semver.org/): `MAJOR.MINOR.PATCH`.
 | `playlist_sync/__init__.py` | `__version__ = "X.Y.Z"` — the single canonical version string |
 | `CHANGELOG.md` | Add a new `## [X.Y.Z] - YYYY-MM-DD` section describing the change |
 
-`playlist_sync/__init__.py` is the **single source of truth** for the version. Do not hardcode the version anywhere else.
+`playlist_sync/__init__.py` is the **single source of truth** for the version: `pyproject.toml`
+reads it at build time (`dynamic = ["version"]`). Do not hardcode the version anywhere else.
 
 PRs that change behaviour without bumping the version and updating the changelog will be asked to do so before merging.
 
@@ -58,7 +59,7 @@ cd ytmusic-to-spotify-sync
 pip install -e ".[dev]"
 
 # Verify the entry point loads
-python -c "import playlist_sync; print(playlist_sync.__version__)"
+ytmusic-sync --version
 
 # Lint and run the offline test suite (no network, no real accounts)
 ruff check .

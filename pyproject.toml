@@ -1,19 +1,23 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ytmusic-to-spotify-sync"
-version = "0.8.0"
+dynamic = ["version"]
 description = "Automatically sync your YouTube Music playlists to Spotify with smart track matching, diff-based updates, and metadata enrichment"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "David Malko", email = "davidmalko87@gmail.com" }]
 requires-python = ">=3.10"
-keywords = ["youtube-music", "spotify", "playlist", "sync", "music", "ytmusic", "spotify-api"]
+keywords = [
+    "youtube-music", "spotify", "playlist", "sync", "music", "ytmusic", "spotify-api",
+    "cli-tool", "playlist-migration", "music-sync", "lastfm", "liked-songs", "json-export",
+]
 dependencies = [
     "pandas>=2.0.0",
-    "spotipy>=2.24.0",
+    "spotipy>=2.26.0",
     "ytmusicapi>=1.8.0",
     "python-dotenv>=1.2.3",
     "tqdm>=4.66.0",
@@ -41,6 +45,11 @@ Changelog = "https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master
 
 [project.scripts]
 ytmusic-sync = "playlist_sync.cli:main"
+
+[tool.setuptools.dynamic]
+# "playlist_sync.__init__", not "playlist_sync": setuptools would pick the repo-root
+# playlist_sync.py script first and execute it
+version = { attr = "playlist_sync.__init__.__version__" }
 
 [tool.setuptools.packages.find]
 # Explicit: a local data/ or build/ folder must never end up in the wheel
