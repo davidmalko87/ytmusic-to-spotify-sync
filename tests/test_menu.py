@@ -494,7 +494,7 @@ def test_held_back_unsaves_need_a_yes_in_the_menu(
     def dispatch(args: argparse.Namespace) -> None:
         runs.append(args)
         if not args.force:
-            args.held_back = 120
+            args.held_back, args.held_back_fps = 120, ["fp1", "fp2"]
 
     monkeypatch.setattr(cli, "dispatch", dispatch)
     keyboard(["", ""])  # real run; Enter = no
@@ -502,3 +502,4 @@ def test_held_back_unsaves_need_a_yes_in_the_menu(
     keyboard(["", "y"])
     menu.action_likes()
     assert [a.force for a in runs] == [False, False, True]
+    assert runs[-1].confirmed_fps == ["fp1", "fp2"]  # only what the user was shown

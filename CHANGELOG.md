@@ -48,6 +48,12 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 - A sync with nothing new to match crashed (`NameError`) when every track had already failed once.
 - `retry-unmatched` retries the full rows (ISRC, duration and all enrichment kept) instead of rebuilding them from `unmatched.csv`; it pushes only what the playlist lacks and stops cleanly on a rate limit.
 - **`sync-likes`** keeps a cumulative `likes_enriched.csv` (one row per current like), so un-liking an older song is mirrored. Unmatched likes are recorded, reuse a later playlist match for free and are searched again with the new `--retry-unmatched`. Liked Songs are fetched without the 10,000 cap, and a sudden mass drop (more than 50 and 20 %) unsaves nothing unless `--force`.
+- **`sync-likes` no longer loses or invents changes**:
+  - Un-liking one of two YT Music entries that match the same Spotify track (song and music video) unsaved that track although the other is still liked; it now stays ("Kept on Spotify"). Unsaves use the URI `sync-likes` saved, not the playlist sync's match for the same video.
+  - A failed Liked Songs save or unsave was recorded as done and never retried. Such likes now stay out of (or in) the saved snapshot so the next run retries them, and the run exits 1.
+  - One failed search, a long rate limit or a network error while saving threw away the whole run (or ended in a traceback). A failed search now skips only that like (five in a row stop the run), and a stop keeps the matches so far.
+  - Likes missing from `likes_enriched.csv` (0.7 kept only the last run's new likes) get a row, with the playlist sync's URI when it has one, so un-liking them is mirrored; an un-like with no known Spotify track is searched once. A locked `likes_enriched.csv` no longer advances the likes snapshot.
+  - The menu's "unsave anyway?" yes unsaves only the likes it listed; a fresh answer that lacks more holds those back again.
 - **`import-csv`** refuses to replace existing sync data (every Spotify match) unless `--force`, which archives it first. Every sync push now skips URIs already in the playlist, so a re-import can't duplicate it.
 - CSV `duration` accepts `m:ss` / `h:mm:ss`; a bad cell names the file and row instead of a traceback. A CSV Excel saved with `;` is read column by column (it used to import as blank tracks), a file without a `title` or `artist` column is refused with the columns it has, and a non-UTF-8 file asks to be saved as "CSV UTF-8" instead of crashing. The menu's CSV import reads the file before it archives the old sync data.
 - `review.csv`, `unmatched.csv` or `likes_unmatched.csv` open in a spreadsheet no longer crash `sync`, `retry-unmatched` or `sync-likes` when the file is due for deletion; the run warns and finishes.
@@ -84,6 +90,8 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 Rows enriched by earlier versions keep their old skip-flags and classifications. To apply the Last.fm fixes to an existing `playlist_enriched.csv`:
 - **Genre / mood only:** run `classify --force` (no API calls). This re-buckets punk/post-punk and drops namesake-based genres for channel uploads.
 - **Missing Last.fm data** (`+` artists, failed requests, duplicate rows): run `lastfm --retry-missing` (add `--dry-run` first to see the counts).
+
+`likes_enriched.csv` from 0.7 holds only the likes of its last run. The first 0.8 `sync-likes` adds a row for every other current like (no Spotify calls; it prints "Recorded N earlier like(s)"). Likes the playlist sync never matched are listed in `likes_unmatched.csv`; run `sync-likes --retry-unmatched` once to search them.
 
 ---
 

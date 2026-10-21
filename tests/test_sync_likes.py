@@ -17,6 +17,7 @@ from playlist_sync import cli, ytmusic_client
 from playlist_sync import config as cfg
 from playlist_sync.csv_manager import read_enriched_csv, write_enriched_csv
 from playlist_sync.models import MatchResult, Track
+from playlist_sync.spotify_client import RateLimitError, SearchUnavailable
 
 
 def like(n: int) -> Track:
@@ -33,6 +34,12 @@ class FakeLikes:
         self.unsaved: list[str] = []
         self.searched: list[str] = []
         self.unmatchable: set[str] = set()
+        self.uri_of: dict[str, str] = {}          # track_id -> Spotify ID (default: same)
+        self.unavailable: set[str] = set()        # searches that fail (SearchUnavailable)
+        self.search_error: BaseException | None = None
+        self.save_error: BaseException | None = None
+        self.refuse_save: set[str] = set()        # Spotify IDs whose save fails
+        self.refuse_unsave: set[str] = set()
 
         (home / "browser.json").write_text("{}", encoding="utf-8")
         cfg.save_setting("SPOTIPY_CLIENT_ID", "a" * 32)
@@ -49,21 +56,36 @@ class FakeLikes:
 
     def _match(self, sp: object, track: Track) -> MatchResult:
         self.searched.append(track.track_id)
+        if self.search_error is not None:
+            raise self.search_error
+        if track.track_id in self.unavailable:
+            raise SearchUnavailable("HTTP 503")
         if track.track_id in self.unmatchable:
             return MatchResult(source_track=track)
-        return MatchResult(source_track=track, spotify_uri=f"spotify:track:{track.track_id}",
+        spotify_id = self.uri_of.get(track.track_id, track.track_id)
+        return MatchResult(source_track=track, spotify_uri=f"spotify:track:{spotify_id}",
                            method="title_artist", confidence=0.9)
 
-    def _save(self, sp: object, ids: list[str], dry_run: bool = False) -> int:
+    def _save(self, sp: object, ids: list[str], dry_run: bool = False,
+              failed: list[str] | None = None) -> int:
+        if self.save_error is not None:
+            raise self.save_error
+        ok = [i for i in ids if i not in self.refuse_save]
+        if failed is not None:
+            failed += [i for i in ids if i in self.refuse_save]
         if not dry_run:
-            self.saved += [i for i in ids if i not in self.saved]
-        return len(ids)
+            self.saved += [i for i in ok if i not in self.saved]
+        return len(ok)
 
-    def _unsave(self, sp: object, ids: list[str], dry_run: bool = False) -> int:
+    def _unsave(self, sp: object, ids: list[str], dry_run: bool = False,
+                failed: list[str] | None = None) -> int:
+        ok = [i for i in ids if i not in self.refuse_unsave]
+        if failed is not None:
+            failed += [i for i in ids if i in self.refuse_unsave]
         if not dry_run:
-            self.unsaved += ids
-            self.saved = [i for i in self.saved if i not in ids]
-        return len(ids)
+            self.unsaved += ok
+            self.saved = [i for i in self.saved if i not in ok]
+        return len(ok)
 
 
 @pytest.fixture
@@ -176,3 +198,180 @@ def test_a_normal_unlike_is_not_held_back(likes: FakeLikes) -> None:
     likes.yt = likes.yt[:-3]
     sync_likes()
     assert len(likes.unsaved) == 3
+
+
+# -- #21: a Spotify track two liked entries map to ---------------------------------
+
+def test_unlike_keeps_a_track_another_like_still_maps_to(likes: FakeLikes, capsys) -> None:
+    likes.uri_of = {"vid00000001": "SHARED", "vid00000002": "SHARED"}  # song + music video
+    sync_likes()
+    likes.yt = [t for t in likes.yt if t.track_id != "vid00000001"]
+    sync_likes()
+    assert likes.unsaved == [] and "SHARED" in likes.saved
+    assert "Kept on Spotify: 1" in capsys.readouterr().out
+    likes.yt = [t for t in likes.yt if t.track_id != "vid00000002"]
+    sync_likes()
+    assert likes.unsaved == ["SHARED"]
+
+
+# -- #11 / #23: a failed save is retried -------------------------------------------
+
+def test_failed_save_exits_1_and_is_retried_without_a_search(likes: FakeLikes) -> None:
+    likes.refuse_save = {"vid00000003"}
+    with pytest.raises(SystemExit) as stop:
+        sync_likes()
+    assert stop.value.code == 1 and "vid00000003" not in likes.saved
+    likes.refuse_save = set()
+    searches = len(likes.searched)
+    sync_likes()
+    assert "vid00000003" in likes.saved
+    assert len(likes.searched) == searches  # URI reused from likes_enriched.csv
+
+
+# -- #16 / #24: a failed unsave is retried -----------------------------------------
+
+def test_failed_unsave_exits_1_and_is_retried(likes: FakeLikes) -> None:
+    sync_likes()
+    likes.yt = likes.yt[1:]
+    likes.refuse_unsave = {"vid00000001"}
+    with pytest.raises(SystemExit) as stop:
+        sync_likes()
+    assert stop.value.code == 1 and "vid00000001" in likes.saved
+    likes.refuse_unsave = set()
+    sync_likes()
+    assert likes.unsaved == ["vid00000001"]
+
+
+# -- #18 / #22: failed searches and rate limits keep the run's work ----------------
+
+def test_one_failed_search_skips_only_that_like(likes: FakeLikes) -> None:
+    likes.unavailable = {"vid00000002"}
+    sync_likes()  # exit 0, like cmd_sync
+    assert sorted(likes.saved) == ["vid00000001", "vid00000003"]
+    likes.unavailable = set()
+    sync_likes()
+    assert sorted(likes.saved) == ["vid00000001", "vid00000002", "vid00000003"]
+
+
+def test_rate_limit_during_matching_keeps_the_matches_so_far(likes: FakeLikes,
+                                                            monkeypatch) -> None:
+    real_match = likes._match
+
+    def limited_after_one(sp: object, track: Track) -> MatchResult:
+        if likes.searched:
+            likes.searched.append(track.track_id)
+            raise RateLimitError(7200)
+        return real_match(sp, track)
+    monkeypatch.setattr(cli, "match_track", limited_after_one)
+    sync_likes()
+    assert likes.saved == []  # no Spotify writes during a ban
+    assert likes_rows()["vid00000001"].spotify_uri == "spotify:track:vid00000001"
+
+    monkeypatch.setattr(cli, "match_track", real_match)
+    likes.searched = []
+    sync_likes()
+    assert sorted(likes.saved) == ["vid00000001", "vid00000002", "vid00000003"]
+    assert sorted(likes.searched) == ["vid00000002", "vid00000003"]  # 1 reused
+
+
+# -- #20 / #25: Spotify stops answering while saving --------------------------------
+
+def test_network_error_while_saving_exits_1_and_keeps_the_matches(likes: FakeLikes,
+                                                                  capsys) -> None:
+    import requests
+
+    likes.save_error = requests.exceptions.ConnectionError("network is down")
+    with pytest.raises(SystemExit) as stop:
+        sync_likes()
+    assert stop.value.code == 1 and "stopped accepting changes" in capsys.readouterr().out
+    assert len(likes_rows()) == 3
+    likes.save_error = None
+    searches = len(likes.searched)
+    sync_likes()
+    assert sorted(likes.saved) == ["vid00000001", "vid00000002", "vid00000003"]
+    assert len(likes.searched) == searches
+
+
+# -- #26: likes without a row (0.7 upgrade, locked CSV) -----------------------------
+
+def test_likes_missing_from_the_csv_get_rows_and_their_unlike_is_mirrored(
+        likes: FakeLikes) -> None:
+    sync_likes()
+    # 0.7 kept only the last run's likes in the CSV; the playlist sync knows song 1
+    write_enriched_csv([likes_rows()["vid00000003"]], cfg.DATA_DIR / "likes_enriched.csv")
+    playlist_row = like(1)
+    playlist_row.spotify_uri, playlist_row.match_attempted = "spotify:track:vid00000001", True
+    write_enriched_csv([playlist_row])
+    sync_likes()
+    rows = likes_rows()
+    assert sorted(rows) == ["vid00000001", "vid00000002", "vid00000003"]
+    assert rows["vid00000001"].spotify_uri and not rows["vid00000002"].match_attempted
+
+    searches = len(likes.searched)
+    likes.yt = [likes.yt[2]]  # un-like songs 1 and 2
+    sync_likes()
+    assert sorted(likes.unsaved) == ["vid00000001", "vid00000002"]
+    assert likes.searched[searches:] == ["vid00000002"]  # no URI known: searched once
+
+
+def test_locked_likes_csv_does_not_advance_the_snapshot(likes: FakeLikes, monkeypatch) -> None:
+    from playlist_sync import csv_manager
+
+    real_to_csv = csv_manager.pd.DataFrame.to_csv
+
+    def locked(self, path, *a, **k):
+        if str(path).endswith("likes_enriched.csv"):
+            raise PermissionError(13, "locked")
+        return real_to_csv(self, path, *a, **k)
+    monkeypatch.setattr(csv_manager.pd.DataFrame, "to_csv", locked)
+    sync_likes()
+    assert not (cfg.LIKES_SNAPSHOTS_DIR / "latest.json").exists()
+
+
+# -- #27: unsave the URI sync-likes saved -------------------------------------------
+
+def test_unlike_unsaves_the_uri_sync_likes_saved(likes: FakeLikes) -> None:
+    sync_likes()  # saved spotify:track:vid00000001
+    playlist_row = like(1)
+    playlist_row.spotify_uri, playlist_row.match_attempted = "spotify:track:OTHER", True
+    write_enriched_csv([playlist_row])  # the playlist sync picked another release
+    likes.yt = likes.yt[1:]
+    sync_likes()
+    assert likes.unsaved == ["vid00000001"]
+
+
+# -- #28: the menu's yes covers only the likes it showed ----------------------------
+
+def test_forced_run_unsaves_only_the_confirmed_likes(likes: FakeLikes) -> None:
+    likes.yt = [like(n) for n in range(1, 201)]
+    sync_likes()
+    likes.yt = likes.yt[:100]
+    args = argparse.Namespace(command="sync-likes", verbose=False, dry_run=False,
+                              retry_unmatched=False, force=False)
+    cli.dispatch(args)
+    confirmed = args.held_back_fps
+    assert len(confirmed) == 100
+    likes.yt = likes.yt[:50]  # the second answer is truncated even more
+    sync_likes(force=True, confirmed_fps=confirmed)
+    assert len(likes.unsaved) == 100
+    assert all(f"vid{n:08d}" in likes.saved for n in range(51, 101))
+
+
+# -- #29: likes_unmatched.csv open in Excel -----------------------------------------
+
+def test_open_likes_unmatched_csv_does_not_stop_the_snapshot(likes: FakeLikes,
+                                                            monkeypatch) -> None:
+    likes.unmatchable = {"vid00000002"}
+    sync_likes()
+    likes.unmatchable = set()
+    real_unlink = Path.unlink
+
+    def locked(self: Path, missing_ok: bool = False) -> None:
+        if self.name == "likes_unmatched.csv":
+            raise PermissionError(32, "being used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", locked)
+    sync_likes(retry_unmatched=True)
+    assert "vid00000002" in likes.saved
+    snapshot = (cfg.LIKES_SNAPSHOTS_DIR / "latest.json").read_text(encoding="utf-8")
+    assert "vid00000002" in snapshot

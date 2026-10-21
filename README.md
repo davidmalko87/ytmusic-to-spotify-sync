@@ -403,7 +403,11 @@ Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state nev
 - `data/likes_enriched.csv` (+ `.json`) — one row per current like, matched or not, so un-liking an old song is mirrored
 - `data/likes_unmatched.csv` — likes that couldn't be matched; a later playlist match is reused for free, and `--retry-unmatched` (or the menu's question) searches them again
 
-All your likes are fetched (no 10,000 cap). If a large share of them suddenly disappears from YT Music's answer — more than 50 and more than 20 % of the last run — nothing is unsaved: that is far more likely an incomplete answer than a real mass un-like. Run `sync-likes --force` (or answer yes in the menu) if you really un-liked them.
+All your likes are fetched (no 10,000 cap). If a large share of them suddenly disappears from YT Music's answer — more than 50 and more than 20 % of the last run — nothing is unsaved: that is far more likely an incomplete answer than a real mass un-like. Run `sync-likes --force` (or answer yes in the menu) if you really un-liked them. The menu's yes covers only the likes it listed: if YT Music's next answer lacks even more, those are held back again.
+
+Un-liking a song unsaves the Spotify track `sync-likes` saved for it (the playlist sync's match is only a fallback), and nothing is unsaved while another current like still maps to the same Spotify track (a song and its music video, say). An un-like whose Spotify track is unknown is searched once.
+
+Nothing is written off on errors: a like whose save failed is saved by the next run (without a new search), an unsave that failed is retried, and a failed search skips only that like (five in a row, a rate limit or `Ctrl+C` stop the run, keeping its matches). `sync-likes` exits with code 1 when Spotify refused saves or unsaves or stopped answering while it wrote them.
 
 ### Recreated the Spotify playlist? Use `repush`
 

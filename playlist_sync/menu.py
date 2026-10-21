@@ -1011,7 +1011,9 @@ def action_likes() -> None:
     if held_back and confirm(
         f"Unsave those {held_back} track(s) from Spotify Liked Songs anyway?", default=False,
     ):
-        run_command("sync-likes", dry_run=dry_run, force=True)
+        # Only the likes listed: a fresh answer that lacks more is held back again
+        run_command("sync-likes", dry_run=dry_run, force=True,
+                    confirmed_fps=getattr(args, "held_back_fps", None))
 
 
 def action_status() -> None:
