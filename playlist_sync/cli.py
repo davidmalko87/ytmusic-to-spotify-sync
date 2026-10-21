@@ -37,6 +37,7 @@ from playlist_sync.config import (
     require_ytmusic_playlist,
 )
 from playlist_sync.csv_manager import (
+    CsvFormatError,
     read_enriched_csv,
     read_source_csv,
     write_enriched_csv,
@@ -284,7 +285,7 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     csv_path = Path(args.csv) if args.csv else get_source_csv(config)
     if csv_path is None:
         print("Error: no source CSV configured.")
-        print("Set SOURCE_CSV in .env or pass --csv <path>")
+        print("Choose one with the setup wizard (menu C > CSV export file) or pass --csv <path>.")
         sys.exit(1)
     if not csv_path.exists():
         print(f"Error: CSV not found: {csv_path}")
@@ -373,7 +374,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if args.from_csv:
         csv_path = Path(args.from_csv) if args.from_csv != "default" else get_source_csv(config)
         if csv_path is None:
-            print("Error: no source CSV configured. Set SOURCE_CSV in .env")
+            print("Error: no source CSV configured. Choose one with the setup wizard "
+                  "(menu C > CSV export file) or pass --from-csv <file>.")
+            sys.exit(1)
+        if not csv_path.is_file():
+            print(f"Error: CSV not found: {csv_path}")
             sys.exit(1)
         current = read_source_csv(csv_path)
         print(f"Loaded {len(current)} tracks from CSV")
@@ -1296,11 +1301,17 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     # Source CSV
     source = get_source_csv(config)
-    if source and source.exists():
-        tracks = read_source_csv(source)
-        print(f"Source CSV:    {len(tracks)} tracks ({source.name})")
-    else:
+    if source is None:
         print("Source CSV:    not configured (optional; set it with the setup wizard)")
+    elif not source.is_file():
+        print(f"Source CSV:    SOURCE_CSV is set, but there is no file at {source}")
+    else:
+        try:
+            tracks = read_source_csv(source)
+        except CsvFormatError as e:
+            print(f"Source CSV:    cannot read it ({e})")
+        else:
+            print(f"Source CSV:    {len(tracks)} tracks ({source.name})")
 
     # Enriched CSV
     if ENRICHED_CSV.exists():
@@ -1458,7 +1469,13 @@ def dispatch(args: argparse.Namespace) -> None:
     }
     handler = commands.get(args.command)
     if handler:
-        handler(args)
+        try:
+            handler(args)
+        except CsvFormatError as e:
+            # A hand-made or Excel-saved CSV: name the cell instead of a traceback
+            print(f"Error: {e}")
+            print("Fix that cell and run the command again (duration is seconds or m:ss).")
+            sys.exit(1)
 
 
 def main() -> None:

@@ -233,3 +233,35 @@ def test_csv_from_before_0_7_1_is_searched_once_then_skipped(
     assert len(searched) == 3 and all(t.match_attempted for t in read_enriched_csv())
     sync()
     assert len(searched) == 3
+
+
+def test_csv_sync_with_clock_durations_matches_and_pushes(world: FakeWorld, home: Path) -> None:
+    export = home / "browser-extension.csv"
+    export.write_text("title,artist,album,trackId,platform,duration\n"
+                      "New,Someone,Alb,vid00000099,ytmusic,3:45\n", encoding="utf-8")
+    sync(from_csv=str(export))
+    assert "spotify:track:vid00000099" in world.playlist
+    assert [t.duration for t in read_enriched_csv()] == [225.0]
+
+
+def test_csv_sync_with_a_bad_cell_stops_before_touching_spotify(
+    world: FakeWorld, home: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    export = home / "browser-extension.csv"
+    export.write_text("title,artist,trackId,duration\nNew,Someone,vid00000099,soon\n",
+                      encoding="utf-8")
+    with pytest.raises(SystemExit):
+        sync(from_csv=str(export))
+    assert "browser-extension.csv, row 2" in capsys.readouterr().out
+    assert world.playlist == [] and world.match_calls == 0
+
+
+def test_csv_sync_with_missing_source_csv_names_the_path(
+    world: FakeWorld, home: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg.save_setting("SOURCE_CSV", "exports/gone.csv")
+    with pytest.raises(SystemExit) as exit_info:
+        sync(from_csv="default")
+    assert exit_info.value.code == 1
+    assert str(home / "exports" / "gone.csv") in capsys.readouterr().out
+    assert world.match_calls == 0 and world.playlist == []

@@ -25,14 +25,30 @@ from playlist_sync.models import Track
 logger = logging.getLogger("playlist_sync")
 
 
-def read_source_csv(path: Path) -> list[Track]:
-    """Read a playlist CSV export into Track objects."""
-    logger.info("Reading source CSV: %s", path)
+class CsvFormatError(ValueError):
+    """A CSV cell the tool cannot read; the message names the file, row and value."""
 
+
+def _tracks_from_csv(path: Path) -> list[Track]:
+    """Parse every row; a bad cell becomes a CsvFormatError that names its row."""
     df = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
     tracks: list[Track] = []
-    for _, row in df.iterrows():
-        tracks.append(Track.from_csv_row(row.to_dict()))
+    # Spreadsheet numbering: row 1 is the header, so the first track is row 2
+    for row_number, (_, row) in enumerate(df.iterrows(), start=2):
+        try:
+            tracks.append(Track.from_csv_row(row.to_dict()))
+        except ValueError as e:
+            message = f"{path.name}, row {row_number}: {e}"
+            logger.debug("Cannot read %s: %s", path, message)  # the caller prints it
+            raise CsvFormatError(message) from e
+    return tracks
+
+
+def read_source_csv(path: Path) -> list[Track]:
+    """Read a playlist CSV export into Track objects (CsvFormatError on a bad cell)."""
+    logger.info("Reading source CSV: %s", path)
+
+    tracks = _tracks_from_csv(path)
 
     logger.info("Loaded %d tracks from source CSV", len(tracks))
     return tracks
@@ -46,10 +62,7 @@ def read_enriched_csv(path: Path | None = None) -> list[Track]:
         return []
 
     logger.info("Reading enriched CSV: %s", path)
-    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
-    tracks: list[Track] = []
-    for _, row in df.iterrows():
-        tracks.append(Track.from_csv_row(row.to_dict()))
+    tracks = _tracks_from_csv(path)
 
     logger.info("Loaded %d tracks from enriched CSV", len(tracks))
     return tracks
@@ -67,12 +80,15 @@ def _safe_csv_write(df: pd.DataFrame, path: Path) -> None:
 
 
 def write_tracks_json(tracks: list[Track], path: Path) -> Path:
-    """Write tracks as {exported_at, track_count, tracks: [...]} JSON (same fields as the CSV)."""
+    """Write tracks as {exported_at, track_count, tracks: [...]} JSON.
+
+    Same fields as the CSV, but typed: numbers, true/false, and null for empty cells.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "track_count": len(tracks),
-        "tracks": [t.to_csv_row() for t in tracks],
+        "tracks": [t.to_json_dict() for t in tracks],
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path

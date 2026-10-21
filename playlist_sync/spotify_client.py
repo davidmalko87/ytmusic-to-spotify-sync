@@ -10,12 +10,15 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import shutil
 import time
+from pathlib import Path
 
 import requests
 import spotipy
 from requests.adapters import HTTPAdapter
+from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyOAuth
 from tqdm import tqdm
 from urllib3.util.retry import Retry
@@ -69,6 +72,26 @@ def _spotify_session() -> requests.Session:
     return session
 
 
+class PrivateCacheFileHandler(CacheFileHandler):
+    """spotipy's token file handler, but the file is owner-only from the moment it exists.
+
+    spotipy < 2.25.1 wrote it with the umask (0644, CVE-2025-27154); newer
+    versions chmod it after writing, which leaves a short world-readable window.
+    Creating it with mode 0600 closes both.
+    """
+
+    def save_token_to_cache(self, token_info: dict) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(self.cache_path, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(token_info, cls=getattr(self, "encoder_cls", None)))
+        except OSError as e:
+            logger.warning("Could not write the Spotify token cache %s: %s", self.cache_path, e)
+            return
+        make_private(Path(self.cache_path))  # O_CREAT's mode is ignored for an existing file
+
+
 def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
     """Create an authenticated Spotify client.
 
@@ -83,13 +106,15 @@ def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
         "user-library-read user-library-modify"
     )
     _adopt_legacy_token_cache()
+    if SPOTIFY_TOKEN_CACHE.is_file():
+        make_private(SPOTIFY_TOKEN_CACHE)  # may have been written 0644 by an older spotipy
     auth_manager = SpotifyOAuth(
         client_id=config["SPOTIPY_CLIENT_ID"],
         client_secret=config["SPOTIPY_CLIENT_SECRET"],
         redirect_uri=config["SPOTIPY_REDIRECT_URI"],
         scope=scope,
         # Pin the token cache to the settings folder; spotipy's default is the CWD
-        cache_path=str(SPOTIFY_TOKEN_CACHE),
+        cache_handler=PrivateCacheFileHandler(cache_path=str(SPOTIFY_TOKEN_CACHE)),
     )
     sp = spotipy.Spotify(
         auth_manager=auth_manager, requests_session=_spotify_session(), requests_timeout=30,
