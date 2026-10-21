@@ -44,7 +44,7 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 | **Metadata enrichment** | Captures ISRC, explicit flag, album release date, album type, track number, and Spotify popularity |
 | **Audio features enrichment** | Schema for danceability, energy, valence, tempo, key, and 7 more *(populated only if your Spotify app has audio-features access; see Known Limitations)* |
 | **Last.fm artist tags** | Pulls play counts, listeners, and dense genre tags via `artist.getInfo` (typical ~93 % coverage on niche libraries) |
-| **Local genre + mood classification** | Derives `primary_genre` (17 buckets) and `mood` (13 labels) from the tag pool — no API calls |
+| **Local genre + mood classification** | Derives `primary_genre` (17 buckets) and `mood` (14 labels) from the tag pool — no API calls |
 | **Run anywhere** | Interactive menu for manual use **and** subcommands for cron/Jenkins — same codebase |
 | **Resumable** | Match progress is cached every 25 tracks; after a rate limit or `Ctrl+C`, re-running continues where it stopped, and matches found before the stop still reach Spotify (checked against the playlist, so not twice) |
 | **Quota-friendly `--limit`** | Cap new tracks per run to stay within Spotify's daily API quota |
@@ -214,6 +214,7 @@ ytmusic-sync sync --from-csv my_export.csv # sync from a specific CSV export
 ytmusic-sync import-csv --csv my_export.csv  # bootstrap local data from a CSV export
 ytmusic-sync retry-unmatched               # standalone retry of previously failed matches
 ytmusic-sync lastfm                        # Last.fm enrichment on the existing data
+ytmusic-sync lastfm --retry-missing        # also retry rows flagged attempted that still have no data
 ytmusic-sync classify                      # re-derive primary_genre and mood from tags
 ytmusic-sync classify --force              # re-classify rows that already have values
 ytmusic-sync sync-likes                    # mirror YT Music likes to Spotify Liked Songs
@@ -300,7 +301,7 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 | `lastfm_playcount`, `lastfm_listeners`, `lastfm_tags` | Last.fm `track.getInfo` |
 | **`artist_tags`** | Last.fm `artist.getInfo` — much denser than track tags |
 | `tag_source` | Which source filled `artist_tags` (`lastfm_artist`, …) |
-| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm endpoints already attempted |
+| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm already answered (found or not found); failed requests stay unset and are retried next run. `lastfm --retry-missing` re-checks flagged rows that still have no data (CSVs enriched before 0.8.0) |
 | `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
 | `skip_reason` | Why the matcher pre-filtered this track (e.g. `no_album` for YT Music tracks lacking album metadata) — set means no Spotify search was attempted |
 | `match_attempted` | `true` once the matcher has run on this track. Tracks with `match_attempted=true AND no spotify_uri` are skipped on subsequent syncs unless `--retry-unmatched` is passed (or `retry-unmatched` is run standalone) |
@@ -315,9 +316,11 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 
 The classifier uses word-boundary tokenisation, so compound tags like `deep house` map to the `electronic` bucket via `house`, and `post-rock` correctly maps to `rock` (not `soundtrack` via `ost`).
 
+A tag that is itself a bucket keyword counts only for that bucket, so `post-punk` is `rock` and never `punk`. Bare `hardcore` decides nothing (it tags hardcore techno as often as hardcore punk), and a `punk` tag loses to a higher-ranked tag of an unrelated genre (`electronic, french, punk` is `electronic`). For YouTube uploads without an album, whose "artist" is usually the uploading channel, artist tags are ignored unless that artist also has album tracks in the library or is named in the title.
+
 Genre buckets, in priority order: `soundtrack`, `classical`, `jazz`, `hip hop`, `metal`, `punk`, `country`, `blues`, `reggae`, `folk`, `electronic`, `ambient`, `rock`, `pop`, `rnb`, `indie`, `world`.
 
-Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `dreamy`, `aggressive`, `nostalgic`, `cinematic`, `ambient`, `instrumental`.
+Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `dreamy`, `aggressive`, `nostalgic`, `cinematic`, `ambient`, `instrumental`, `acoustic`.
 
 ### Audio features reference
 
