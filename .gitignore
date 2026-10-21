@@ -2,7 +2,10 @@
 .env
 browser.json
 oauth.json
+.cache
+.spotify_token_cache
 .cache-*
+browser.json.new
 
 # Data (personal playlists, sync state)
 data/
@@ -11,9 +14,12 @@ data/
 
 # Logs
 *.log
+*.log.*
 
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.pyc
 *.pyo
 *.egg-info/

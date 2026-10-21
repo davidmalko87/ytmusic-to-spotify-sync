@@ -1,14 +1,25 @@
-# ytmusic-to-spotify-sync
+# YouTube Music to Spotify Playlist Sync
 
-> Automatically sync your YouTube Music playlists to Spotify — with smart track matching, diff-based updates, and full metadata enrichment.
+[![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/ytmusic-to-spotify-sync.svg?logo=pypi&logoColor=white)](https://pypi.org/project/ytmusic-to-spotify-sync/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/ytmusic-to-spotify-sync.svg)](https://pypi.org/project/ytmusic-to-spotify-sync/)
+[![Python](https://img.shields.io/pypi/pyversions/ytmusic-to-spotify-sync.svg?logo=python&logoColor=white)](https://pypi.org/project/ytmusic-to-spotify-sync/)
+[![YouTube Music](https://img.shields.io/badge/YouTube%20Music-source-FF0000.svg?logo=youtubemusic&logoColor=white)](https://music.youtube.com)
+[![Spotify](https://img.shields.io/badge/Spotify-target-1DB954.svg?logo=spotify&logoColor=white)](https://developer.spotify.com/documentation/web-api)
+[![Last.fm](https://img.shields.io/badge/Last.fm-enrichment-D51007.svg?logo=lastdotfm&logoColor=white)](https://www.last.fm/api)
+[![Setup](https://img.shields.io/badge/setup-guided%20wizard-success.svg)](#1-configure--setup-wizard)
+[![Source](https://img.shields.io/badge/source-YT%20Music%20API%20%7C%20CSV%20export-success.svg)](#configuration-reference)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+[![Last commit](https://img.shields.io/github/last-commit/davidmalko87/ytmusic-to-spotify-sync.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/commits/master)
+[![GitHub issues](https://img.shields.io/github/issues/davidmalko87/ytmusic-to-spotify-sync.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/issues)
 
-[![CI](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.7.1-blue)](CHANGELOG.md)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
-[![Last Commit](https://img.shields.io/github/last-commit/davidmalko87/ytmusic-to-spotify-sync)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/commits/master)
-[![Open Issues](https://img.shields.io/github/issues/davidmalko87/ytmusic-to-spotify-sync)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/issues)
+Keep a **YouTube Music playlist in sync with Spotify**: the tool reads the playlist through the
+**YT Music API**, finds each track on **Spotify** with **title + artist / fuzzy matching** (plus an
+exact ISRC pass for CSV exports that carry ISRCs),
+pushes only what changed, and enriches every track with **Spotify and Last.fm metadata**. It also
+**exports and imports YT Music playlists and Liked Songs** (JSON + CSV) without Spotify.
+Fully resumable, with a **guided setup wizard**, an interactive menu and CLI mode.
 
 ---
 
@@ -21,157 +32,228 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 ## Features
 
 | Feature | Description |
-|---------|-------------|
+|---|---|
+| **Guided setup wizard** | Asks for the YT Music login, both playlists, the Spotify app keys and the optional Last.fm key, checks each one live and saves it to `.env` — no manual file editing |
+| **Playlist pickers** | Choose the YT Music source from your library and the Spotify target from your playlists (or let it create one); pasted links work too |
 | **Live YT Music API** | Fetches your playlist directly via `ytmusicapi` — no manual export required |
-| **3-pass smart matching** | ISRC exact match → normalised title + artist → fuzzy fallback with duration validation |
+| **3-pass smart matching** | Normalised title + artist → fuzzy fallback, both behind hard title, artist and duration checks; an exact ISRC match runs first for CSV exports with an `isrc` column (the YT Music API has no ISRCs) |
 | **Diff-based sync** | JSON snapshots track playlist state; only added/removed tracks are touched each run |
 | **Spotify playlist management** | Adds new matches and removes deleted tracks automatically |
-| **Audio features enrichment** | Schema for danceability, energy, valence, tempo, key, and 7 more *(populated only if your Spotify app has audio-features access; see Known limitations)* |
+| **Liked Songs sync** | Mirrors YT Music likes into Spotify **Liked Songs** |
+| **YT Music backup** | Exports a playlist, Liked Songs or the whole library to JSON + CSV, and imports a file or another playlist into a new or existing YT Music playlist — no Spotify needed |
+| **JSON + CSV output** | Every enriched CSV gets a matching `.json` copy, ready for `jq` and dashboards |
 | **Metadata enrichment** | Captures ISRC, explicit flag, album release date, album type, track number, and Spotify popularity |
+| **Audio features enrichment** | Schema for danceability, energy, valence, tempo, key, and 7 more *(populated only if your Spotify app has audio-features access; see Known Limitations)* |
 | **Last.fm artist tags** | Pulls play counts, listeners, and dense genre tags via `artist.getInfo` (typical ~93 % coverage on niche libraries) |
-| **Local genre + mood classification** | Derives `primary_genre` (17 buckets) and `mood` (13 labels) from the tag pool — no API calls |
-| **CSV fallback** | Works from a CSV export if you prefer not to use the live API |
-| **Resume after rate limits** | Match progress is cached every 25 tracks; re-running continues where you left off |
+| **Local genre + mood classification** | Derives `primary_genre` (17 buckets) and `mood` (14 labels) from the tag pool — no API calls |
+| **Run anywhere** | Interactive menu for manual use **and** subcommands for cron/Jenkins — same codebase |
+| **Resumable** | Match progress is cached every 25 tracks; after a rate limit or `Ctrl+C`, re-running continues where it stopped, and matches found before the stop still reach Spotify (checked against the playlist, so not twice) |
 | **Quota-friendly `--limit`** | Cap new tracks per run to stay within Spotify's daily API quota |
-| **Interactive menu** | Run without arguments for a guided, looping step-by-step experience |
-| **Dry-run mode** | Preview every change before it is applied |
+| **Dry-run mode** | Every Spotify-changing command can run without changing anything |
+| **CSV fallback** | Works from a CSV export if you prefer not to use the live API |
 | **Unmatched tracking** | Saves failed matches to `data/unmatched.csv` for manual review or later retry |
+
+---
+
+## Install
+
+**Via PyPI (recommended):**
+
+```bash
+pip install ytmusic-to-spotify-sync
+```
+
+```bash
+pipx install ytmusic-to-spotify-sync     # isolated install, puts ytmusic-sync on PATH
+pip install -U ytmusic-to-spotify-sync   # upgrade
+```
+
+This installs the `ytmusic-sync` command.
+
+**Or clone for development:**
+
+```bash
+git clone https://github.com/davidmalko87/ytmusic-to-spotify-sync.git
+cd ytmusic-to-spotify-sync
+pip install -r requirements.txt          # or: pip install -e ".[dev]" for tests + ruff
+```
+
+With a clone, run `python playlist_sync.py` wherever this README says `ytmusic-sync`.
+
+Requirements: **Python 3.10+**.
+
+### Where your settings live
+
+`.env`, `browser.json` (YT Music login), the Spotify token cache, `data/` and the log file are kept
+together in one **settings folder**:
+
+| How you run it | Settings folder |
+|---|---|
+| Git clone — `python playlist_sync.py` | the repo folder |
+| PyPI install on Windows — `ytmusic-sync` | `%APPDATA%\ytmusic-to-spotify-sync` |
+| PyPI install on macOS | `~/Library/Application Support/ytmusic-to-spotify-sync` |
+| PyPI install on Linux | `~/.config/ytmusic-to-spotify-sync` (or `$XDG_CONFIG_HOME/...`) |
+| Either, with `PLAYLIST_SYNC_HOME` set | that folder (handy for cron/Jenkins) |
+
+The folder is created on first use and the same one is used from any terminal. The menu header and
+`ytmusic-sync status` show the folder in use. Upgrading from 0.7.x or older via pip? Those versions
+kept their settings inside `site-packages`; the setup wizard finds them and offers to copy them over.
 
 ---
 
 ## Quick Start
 
-### 1. Install
+### 1. Configure — setup wizard
 
 ```bash
-git clone https://github.com/davidmalko87/ytmusic-to-spotify-sync.git
-cd ytmusic-to-spotify-sync
-pip install -r requirements.txt
+ytmusic-sync setup
 ```
 
-### 2. Configure
+The wizard walks through five steps and saves every answer to `.env` for you:
 
-```bash
-cp .env.example .env
-```
+1. **YT Music login** — paste the request headers of one YT Music page from DevTools (see below).
+   The login is checked with YT Music before it is saved; it stays valid for about two years.
+2. **YT Music playlist** — pick it from your library by number, search by name, or paste its link.
+3. **Spotify app keys** — create an app at the
+   [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) with the redirect URI
+   `http://127.0.0.1:8888/callback` and the **Web API** checkbox, then paste its Client ID and
+   secret (the secret is hidden while you type). A browser window opens once to grant access.
+   Spotify only runs developer apps while the account that created the app has **Premium**.
+4. **Spotify playlist** — pick one of yours, paste a link, or let the wizard create a private
+   playlist named after the YT Music one.
+5. **Last.fm key** *(optional)* — free from [last.fm/api/account/create](https://www.last.fm/api/account/create);
+   checked with Last.fm before it is saved.
 
-Edit `.env` with your credentials:
-
-| Variable | Where to get it |
-|----------|----------------|
-| `SPOTIPY_CLIENT_ID` | [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) → Create App |
-| `SPOTIPY_CLIENT_SECRET` | Same app page, under "Settings" |
-| `SPOTIPY_REDIRECT_URI` | Set to `http://127.0.0.1:8888/callback` and add it in the Spotify app settings |
-| `SPOTIFY_PLAYLIST_ID` | Create a playlist on Spotify; the ID is the last segment of its URL |
-| `YTMUSIC_PLAYLIST_ID` | From your YT Music playlist URL: `...playlist?list=<ID>` |
-
-### 3. Authenticate YT Music
-
-```bash
-python playlist_sync.py setup-ytmusic
-```
-
-One-time setup — paste request headers from browser DevTools. Auth is valid for ~2 years.
+Finished steps are skipped on later runs unless you choose to change them; `Ctrl+C` stops the
+wizard with everything entered so far kept. Running `ytmusic-sync` with no arguments offers the
+wizard automatically on first start.
 
 <details>
-<summary>How to get the request headers</summary>
+<summary>How to copy the YT Music request headers</summary>
 
-1. Open [music.youtube.com](https://music.youtube.com) in your browser (logged in)
-2. Press **F12** to open DevTools
-3. Go to the **Network** tab and type `/browse` in the filter bar
-4. Click on any playlist or page in YT Music to trigger a request
-5. Find a **POST** request to `browse` with **status 200**
-6. Click it → **Headers** tab → **Request Headers**
-7. Copy all the request headers and paste them into the terminal when prompted
+1. Open [music.youtube.com](https://music.youtube.com) and make sure you are logged in
+2. Press **F12** and switch to the **Network** tab
+3. Type `browse` into the filter box, then click **Home** or **Library**
+4. Find a request named `browse?...` (method **POST**, status **200**)
+5. Copy its request headers — any one of these works:
+   - **Chrome / Edge (easiest):** right-click it → **Copy** → **Copy as cURL (bash)**
+   - **Firefox:** right-click it → **Copy Value** → **Copy Request Headers**
+   - **Any browser:** **Headers** tab → **Request Headers** → select every line from the first
+     header to the last → `Ctrl+C`
+6. Paste into the terminal and press Enter on an empty line
 
-Both the Chrome two-line format and the standard `key: value` format are accepted.
+If the paste can't be used (single line, missing `cookie` or `authorization`, selection started
+mid-cookie), the wizard explains what went wrong and asks again. The login is saved in `browser.json` in the
+settings folder — treat it like a password.
 
 </details>
 
-### 4. Run your first sync
+### 2. Run — interactive menu
 
 ```bash
-# Preview what would happen (no changes made)
-python playlist_sync.py sync --dry-run
-
-# Run the actual sync
-python playlist_sync.py sync
+ytmusic-sync              # or, from a clone: python playlist_sync.py
 ```
 
----
+```
+==================================================================
+  YT Music -> Spotify Sync   v0.8.0
+==================================================================
+  Settings folder: C:\Users\you\ytmusic-to-spotify-sync
 
-## Configuration reference
+  SETUP
+    [ OK ] YT Music login     saved
+    [ OK ] YT Music playlist  Road Trip Mix
+    [ OK ] Spotify app keys   Client ID ******3f9c
+    [ OK ] Spotify playlist   Road Trip Mix
+    [ OK ] Last.fm key        ******71d2
 
-All options are set via environment variables (`.env` file or shell environment).
+  SYNC
+    1  Sync playlist now            YT Music -> Spotify
+    2  Preview changes              what changed on YT Music
+    3  Sync Liked Songs             YT likes -> Spotify Liked Songs
+    4  Status                       match rate, unmatched, snapshots
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SPOTIPY_CLIENT_ID` | Yes | — | Spotify app client ID |
-| `SPOTIPY_CLIENT_SECRET` | Yes | — | Spotify app client secret |
-| `SPOTIPY_REDIRECT_URI` | No | `http://127.0.0.1:8888/callback` | OAuth redirect URI |
-| `SPOTIFY_PLAYLIST_ID` | Yes | — | ID of the target Spotify playlist |
-| `YTMUSIC_PLAYLIST_ID` | Yes* | — | ID of the source YT Music playlist (*not needed with `--from-csv`) |
-| `YTMUSIC_AUTH_FILE` | No | `browser.json` | Path to the YT Music auth JSON file |
-| `SOURCE_CSV` | No | — | Path to a CSV export to use instead of the live API |
-| `LASTFM_API_KEY` | No | — | Free key from [last.fm/api/account/create](https://www.last.fm/api/account/create) — enables play-count, listener, and artist-tag enrichment |
+  FIX & MAINTAIN
+    5  Retry unmatched tracks       search Spotify again
+    6  Re-fill Spotify playlist     after recreating or emptying it
 
----
+  EXTRAS
+    7  Last.fm tags & play counts   needs a free Last.fm key
+    8  Genre & mood labels          from tags, no API calls
+    9  Save a JSON copy             of the synced data, where you choose
+   10  Use a CSV export             import or sync from a CSV file
+   11  Save a snapshot              record the YT playlist as it is now
 
-## Usage
+  YT MUSIC BACKUP (no Spotify needed)
+   12  Export from YT Music         playlist / Liked Songs -> JSON + CSV
+   13  Import into YT Music         file or playlist -> YT playlist
 
-### Interactive mode
+  SETTINGS
+    S  Setup wizard                 walk through every step
+    C  Change one setting           playlists, keys, login
+    Q  Quit
+```
+
+The **SETUP** block shows what is configured and **Next** suggests the next step. Any action that
+needs missing setup offers to run just those wizard steps first, and actions that change Spotify
+ask whether to run for real or as a dry run. **C** changes a single setting (login, either
+playlist, Spotify keys, Last.fm key, CSV export file, redirect URI).
+
+### 3. Run — CLI (automation)
 
 ```bash
-python playlist_sync.py
+ytmusic-sync setup                         # guided setup wizard (interactive)
+ytmusic-sync setup-ytmusic                 # only the YT Music login step
+ytmusic-sync snapshot                      # save the current YT Music playlist state
+ytmusic-sync diff                          # show changes since the last snapshot
+ytmusic-sync sync                          # full sync (YT Music API -> Spotify)
+ytmusic-sync sync --dry-run                # same work, nothing changed on Spotify
+ytmusic-sync sync --limit 50               # match at most 50 new tracks this run
+ytmusic-sync sync --retry-unmatched        # also retry tracks that previously failed
+ytmusic-sync sync --from-csv               # sync from SOURCE_CSV instead of the API
+ytmusic-sync sync --from-csv my_export.csv # sync from a specific CSV export
+ytmusic-sync import-csv --csv my_export.csv  # one-time bootstrap from a CSV export
+ytmusic-sync import-csv --csv my_export.csv --force  # replace existing sync data (archived first)
+ytmusic-sync retry-unmatched               # standalone retry of previously failed matches
+ytmusic-sync lastfm                        # Last.fm enrichment on the existing data
+ytmusic-sync lastfm --retry-missing        # also retry rows flagged attempted that still have no data
+ytmusic-sync classify                      # re-derive primary_genre and mood from tags
+ytmusic-sync classify --force              # re-classify rows that already have values
+ytmusic-sync sync-likes                    # mirror YT Music likes to Spotify Liked Songs
+ytmusic-sync sync-likes --dry-run          # preview likes-sync changes
+ytmusic-sync sync-likes --retry-unmatched  # also search again for likes that did not match
+ytmusic-sync sync-likes --force            # unsave even after a sudden mass drop (see below)
+ytmusic-sync export -o my_data.json        # copy of the enriched data as JSON, anywhere
+ytmusic-sync export-yt --playlist liked    # YT Music Liked Songs -> data/exports/*.json + .csv
+ytmusic-sync export-yt --playlist <ID-or-link>  # one YT Music playlist -> JSON + CSV
+ytmusic-sync export-yt --all               # Liked Songs + every library playlist, one dated folder
+ytmusic-sync import-yt backup.json         # export file -> new private YT Music playlist
+ytmusic-sync import-yt backup.json --to <ID-or-link>  # ... or into one of your playlists
+ytmusic-sync import-yt <ID-or-link> --new-name "Copy" --privacy unlisted  # copy a playlist
+ytmusic-sync import-yt liked --dry-run     # preview copying Liked Songs into a new playlist
+ytmusic-sync repush                        # re-push all matches (idempotent, only adds missing)
+ytmusic-sync repush --replace              # empty the playlist first, then add (cleans duplicates)
+ytmusic-sync repush --dry-run              # preview without pushing
+ytmusic-sync status                        # settings folder, match rate, snapshots
 ```
 
-```
-==================================================
-  Playlist Sync: YT Music -> Spotify
-==================================================
+CSV exports (`import-csv`, `sync --from-csv`) need a `title` and an `artist` column; `album`,
+`duration` (seconds or `m:ss`), `isrc`, `trackId` and `platform` are used when present. Files
+Excel saved with `;` as the separator are read as such. Save the file as "CSV UTF-8": another
+encoding, a missing column or a bad cell stops the command with the file and row named, before
+anything is changed.
 
-  [1]  Setup YT Music auth
-  [2]  Import from CSV
-  [3]  Snapshot YT Music playlist
-  [4]  Show diff (changes)
-  [5]  Full sync to Spotify
-  [6]  Sync from CSV file
-  [7]  Retry unmatched tracks
-  [8]  Enrich with Last.fm
-  [9]  Classify genre + mood from tags
-  [10] Sync Liked Songs (YTM <-> Spotify)
-  [11] Export enriched data to JSON
-  [12] Re-push to recreated Spotify playlist
-  [13] Show status
-  [0]  Exit
-```
-
-### Command-line mode
+All commands accept `--verbose` / `-v` (before the command) for debug-level log output, e.g.
+`ytmusic-sync -v sync`. For cron/Jenkins, set `PLAYLIST_SYNC_HOME` so the job always uses the same
+settings folder:
 
 ```bash
-python playlist_sync.py setup-ytmusic          # One-time browser auth setup
-python playlist_sync.py snapshot               # Save current playlist state
-python playlist_sync.py diff                   # Show changes since last snapshot
-python playlist_sync.py sync                   # Full sync (YT Music API → Spotify)
-python playlist_sync.py sync --from-csv        # Sync from CSV export instead
-python playlist_sync.py sync --dry-run         # Preview without making changes
-python playlist_sync.py sync --limit 50        # Match at most 50 new tracks this run
-python playlist_sync.py sync --retry-unmatched # Also retry tracks that previously failed
-python playlist_sync.py retry-unmatched        # Standalone retry of previously failed matches
-python playlist_sync.py lastfm                 # Re-run Last.fm enrichment on the existing CSV
-python playlist_sync.py classify               # Re-derive primary_genre and mood from tags
-python playlist_sync.py classify --force       # Re-classify even rows that already have values
-python playlist_sync.py sync-likes             # Mirror YT Music liked songs to Spotify Liked Songs
-python playlist_sync.py sync-likes --dry-run   # Preview likes-sync changes
-python playlist_sync.py export                 # Export enriched CSV as JSON (default: data/playlist_enriched.json)
-python playlist_sync.py export -o my_data.json # Custom output path
-python playlist_sync.py repush                 # Re-push all matched URIs (idempotent — only adds missing)
-python playlist_sync.py repush --replace       # Wipe the playlist first, then add (cleans duplicates)
-python playlist_sync.py repush --dry-run       # Preview without pushing
-python playlist_sync.py status                 # Show sync statistics
+PLAYLIST_SYNC_HOME=/srv/ytmusic-sync ytmusic-sync sync --limit 200
 ```
 
-All commands accept `--verbose` / `-v` for debug-level log output.
+Run `setup` once interactively first — it also caches the Spotify login, which needs a browser the
+first time. After that the other commands run unattended: when something is not configured they
+print what is missing and exit with code 1 instead of asking.
 
 ---
 
@@ -197,44 +279,58 @@ YT Music Playlist ──(API or CSV)──> Current State
 
 ### Track matching strategy
 
-The matcher runs three passes in order of reliability:
+The matcher runs up to three passes in order of reliability:
 
-1. **ISRC match** — searches Spotify by `isrc:` query; highest accuracy, ~95 % confidence
-2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded), validated by duration ± 5 s
+1. **ISRC match** — only for tracks that carry an ISRC, i.e. from a CSV export with an `isrc`
+   column (`sync --from-csv`, or `import-csv` before the first sync). The YT Music API returns no
+   ISRCs, so playlists and Liked Songs read from it start at pass 2. Searches Spotify by `isrc:`;
+   highest accuracy, confidence 0.95–1.0
+2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded); a duration within ± 5 s scores a bonus
 3. **Relaxed** — title-only search with fuzzy artist matching; catches live versions and alternate releases
+
+Before scoring, passes 2 and 3 drop every candidate that fails a hard check. This rejects most
+same-title songs by other artists, other songs by the same artist and much longer versions:
+
+- the title must be at least 60 % similar (version suffixes such as ` - 2015 Remaster` or
+  `(Live)` are ignored for this). A match that passes only once a suffix is ignored gets a
+  confidence below 0.75 when that suffix names another version (` - Extended Remix`, `(Part 2)`,
+  `(Live)`); remaster, mono, edition and radio-edit notes do not count. The best candidate is
+  chosen first, so this flag never lets another version win;
+- when both durations are known, they may differ by 15 s at most;
+- one of the track's artists must be at least 60 % similar to one of the Spotify artists. An
+  artist written in another alphabet (`Zemfira` / `Земфира`) still passes when the title is
+  near-identical and the durations are within 5 s, with a confidence below 0.75. Two different
+  names in the same alphabet are rejected, even for a same-length cover.
+
+The checks compare text and length, not recordings: a sequel with a near-identical title by the
+same artist (`The Unforgiven II` / `The Unforgiven`, 9 s apart) can still pass when the right
+track is missing from Spotify's results.
+
+Fuzzy matches (passes 2 and 3) below confidence 0.75 are still added to Spotify and also listed
+in `data/review.csv`, lowest first, with both links, so you can check them by hand. The file is
+rebuilt on every sync and removed when nothing needs a look. If it (or `unmatched.csv`,
+`likes_unmatched.csv`) is still open in a spreadsheet then, the sync only warns that the open copy
+is out of date.
 
 Unmatched tracks are written to `data/unmatched.csv` and can be retried later with `retry-unmatched`.
 
----
+`sync` exits with code 1 when the Spotify playlist cannot be opened or is not yours (checked
+before any search), or when matched tracks could not be added or removed tracks could not be
+taken off Spotify, including a long rate limit or a network error while it adds or removes them.
+Nothing is lost: the next sync retries them. A rate limit or `Ctrl+C` during matching still
+exits 0 with progress saved, and so does a rate limit in the metadata backfill after the push
+(the next sync fetches the rest).
 
-## Project structure
+Removals are only applied against the source the sync data came from. After switching
+`YTMUSIC_PLAYLIST_ID` (by hand, or in the menu without archiving), the first sync of the new
+source removes nothing from Spotify, even if `snapshot` ran in between; removals start with its
+second sync. `data/enriched_source.json` records which source `playlist_enriched.csv` belongs to.
+Data from 0.7 has no such record yet: its first 0.8 sync removes only tracks the snapshot of the
+current source also lists, as 0.7 did.
 
-```
-ytmusic-to-spotify-sync/
-├── playlist_sync.py           # Entry point
-├── playlist_sync/
-│   ├── __init__.py            # Package version (canonical version source)
-│   ├── cli.py                 # Commands and interactive menu
-│   ├── config.py              # Environment variables and paths
-│   ├── models.py              # Track, MatchResult, DiffResult dataclasses
-│   ├── utils.py               # Text normalisation and logging setup
-│   ├── csv_manager.py         # CSV I/O (BOM-aware)
-│   ├── ytmusic_client.py      # YT Music API wrapper
-│   ├── spotify_client.py      # Spotify API wrapper with rate-limit handling
-│   ├── matcher.py             # 3-pass track matching engine
-│   ├── differ.py              # Snapshot diff engine
-│   ├── enricher.py            # Metadata, audio features, classification
-│   └── lastfm_client.py       # Last.fm API wrapper (track + artist endpoints)
-├── data/                      # Created at runtime
-│   ├── snapshots/             # JSON snapshots (latest.json + timestamped)
-│   ├── playlist_enriched.csv  # Full enriched output
-│   └── unmatched.csv          # Tracks that could not be matched
-├── .env.example               # Credential template
-├── requirements.txt
-├── CHANGELOG.md
-├── CONTRIBUTING.md
-└── SETUP.md                   # Detailed step-by-step setup guide
-```
+Matches found by a run that was stopped before they reached Spotify are kept in
+`data/match_cache.json` and added by the next sync. If that file cannot be read, it is renamed to
+`match_cache.json.bad` with a warning; run `repush` once so nothing it held is missing.
 
 ---
 
@@ -243,9 +339,10 @@ ytmusic-to-spotify-sync/
 The sync produces `data/playlist_enriched.csv` with **50 columns**:
 
 | Column | Source |
-|--------|--------|
+|---|---|
 | `title`, `artist`, `album` | YT Music |
-| `trackId`, `url`, `duration` | YT Music |
+| `platform`, `trackId`, `url`, `duration` | YT Music (`platform` is `ytmusic`, or the CSV export's own value) |
+| `addedDate`, `addedBy` | Copied from a CSV export that has them; empty for the YT Music API |
 | `spotify_uri`, `spotify_url`, `spotify_duration_ms` | Spotify match |
 | `isrc`, `isrc_enriched`, `explicit`, `album_release_date` | Spotify metadata |
 | `popularity` | Spotify track popularity (0–100) — only with extended-access apps |
@@ -260,7 +357,7 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 | `lastfm_playcount`, `lastfm_listeners`, `lastfm_tags` | Last.fm `track.getInfo` |
 | **`artist_tags`** | Last.fm `artist.getInfo` — much denser than track tags |
 | `tag_source` | Which source filled `artist_tags` (`lastfm_artist`, …) |
-| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm endpoints already attempted |
+| `lastfm_attempted`, `lastfm_track_attempted` | Skip-flags — Last.fm already answered (found or not found); failed requests stay unset and are retried next run. `lastfm --retry-missing` re-checks flagged rows that still have no data (CSVs enriched before 0.8.0) |
 | `spotify_metadata_attempted`, `spotify_genres_attempted` | Skip-flags — Spotify endpoints already attempted |
 | `skip_reason` | Why the matcher pre-filtered this track (e.g. `no_album` for YT Music tracks lacking album metadata) — set means no Spotify search was attempted |
 | `match_attempted` | `true` once the matcher has run on this track. Tracks with `match_attempted=true AND no spotify_uri` are skipped on subsequent syncs unless `--retry-unmatched` is passed (or `retry-unmatched` is run standalone) |
@@ -271,18 +368,20 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 
 ### Genre & mood classification
 
-`primary_genre` and `mood` are **derived locally** from the tag pool (`artist_tags` + `lastfm_tags`) — no API calls. This runs automatically at the end of every `sync` and `lastfm` command, and can be triggered standalone with `python playlist_sync.py classify` (or `--force` to re-bucket rows that already have values).
+`primary_genre` and `mood` are **derived locally** from the tag pool (`artist_tags` + `lastfm_tags`) — no API calls. This runs automatically at the end of every `sync` and `lastfm` command, and can be triggered standalone with `ytmusic-sync classify` (or `--force` to re-bucket rows that already have values).
 
 The classifier uses word-boundary tokenisation, so compound tags like `deep house` map to the `electronic` bucket via `house`, and `post-rock` correctly maps to `rock` (not `soundtrack` via `ost`).
 
+A tag that is itself a bucket keyword counts only for that bucket, so `post-punk` is `rock` and never `punk`. Bare `hardcore` decides nothing (it tags hardcore techno as often as hardcore punk), and a `punk` tag loses to a higher-ranked tag of an unrelated genre (`electronic, french, punk` is `electronic`). For YouTube uploads without an album, whose "artist" is usually the uploading channel, artist tags are ignored unless that artist also has album tracks in the library or is named in the title.
+
 Genre buckets, in priority order: `soundtrack`, `classical`, `jazz`, `hip hop`, `metal`, `punk`, `country`, `blues`, `reggae`, `folk`, `electronic`, `ambient`, `rock`, `pop`, `rnb`, `indie`, `world`.
 
-Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `dreamy`, `aggressive`, `nostalgic`, `cinematic`, `ambient`, `instrumental`.
+Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `dreamy`, `aggressive`, `nostalgic`, `cinematic`, `ambient`, `instrumental`, `acoustic`.
 
 ### Audio features reference
 
 | Feature | Range | Meaning |
-|---------|-------|---------|
+|---|---|---|
 | `danceability` | 0.0 – 1.0 | Suitability for dancing (tempo, rhythm, beat strength) |
 | `energy` | 0.0 – 1.0 | Intensity and activity (loud, fast, noisy = high) |
 | `valence` | 0.0 – 1.0 | Musical positiveness (happy = high, sad/angry = low) |
@@ -296,83 +395,182 @@ Mood labels: `chill`, `energetic`, `dark`, `sad`, `happy`, `epic`, `romantic`, `
 | `mode` | 0 or 1 | Modality (0 = minor, 1 = major) |
 | `time_signature` | int | Estimated beats per bar |
 
----
-
-## Liked songs sync
+### Liked songs sync
 
 ```bash
-python playlist_sync.py sync-likes
+ytmusic-sync sync-likes
 ```
 
-Mirrors your YT Music **Liked Songs** to Spotify's **Liked Songs** library (`/me/tracks`). Uses the same 3-pass matcher and reuses Spotify URIs already discovered during regular playlist sync, so a track present in both places is matched only once.
+Mirrors your YT Music **Liked Songs** to Spotify's **Liked Songs** library (`/me/tracks`). Uses the same 3-pass matcher and reuses Spotify URIs already discovered during regular playlist sync, so a track present in both places is matched only once. It needs the YT Music login and the Spotify app keys, but no Spotify playlist.
 
 Maintains its own snapshot under `data/snapshots/likes/` so likes-diff state never collides with playlist-diff state. Outputs:
-- `data/likes_enriched.csv` — matched + unmatched likes with the same 49-column schema
-- `data/likes_unmatched.csv` — likes that couldn't be matched
+- `data/likes_enriched.csv` (+ `.json`) — one row per current like, matched or not, so un-liking an old song is mirrored
+- `data/likes_unmatched.csv` — likes that couldn't be matched; a later playlist match is reused for free, and `--retry-unmatched` (or the menu's question) searches them again
 
-**One-time re-authorization required** on first launch after upgrading to 0.7.0 — the new scope (`user-library-modify`) needs your consent. spotipy refreshes the cached token automatically.
+All your likes are fetched (no 10,000 cap). If a large share of them suddenly disappears from YT Music's answer — more than 50 and more than 20 % of the last run — nothing is unsaved: that is far more likely an incomplete answer than a real mass un-like. Run `sync-likes --force` (or answer yes in the menu) if you really un-liked them. The menu's yes covers only the likes it listed: if YT Music's next answer lacks even more, those are held back again.
 
-## Recreated the Spotify playlist? Use `repush`
+Un-liking a song unsaves the Spotify track `sync-likes` saved for it (the playlist sync's match is only a fallback), and nothing is unsaved while another current like still maps to the same Spotify track (a song and its music video, say). An un-like whose Spotify track is unknown is searched once, unless it was searched before without a match or skipped (a video without album), since nothing was saved for it then.
 
-If you delete and recreate your Spotify playlist (new ID in `.env`), `sync` won't repopulate it — `sync` only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". Run:
+Nothing is written off on errors: a like whose save failed is saved by the next run (without a new search), an unsave that failed is retried, and a failed search skips only that like (five in a row, a rate limit or `Ctrl+C` stop the run, keeping its matches). `sync-likes` exits with code 1 when Spotify refused saves or unsaves or stopped answering while it wrote them.
 
-```bash
-python playlist_sync.py repush             # idempotent — only adds URIs missing from the playlist
-python playlist_sync.py repush --replace   # wipe the playlist first, then add (cleans dupes)
-python playlist_sync.py repush --dry-run   # preview the push
-```
+### Recreated the Spotify playlist? Use `repush`
 
-Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks.
-
-## JSON export
+If you delete and recreate your Spotify playlist, `sync` won't repopulate it — `sync` only pushes *newly-matched* tracks since the last snapshot, and an empty destination playlist isn't a "new match". Point the tool at the new playlist (menu **C** → Spotify playlist), then choose **6 Re-fill Spotify playlist** or run:
 
 ```bash
-python playlist_sync.py export                       # writes data/playlist_enriched.json
-python playlist_sync.py export -o /tmp/my_data.json  # custom path
+ytmusic-sync repush             # idempotent — only adds URIs missing from the playlist
+ytmusic-sync repush --replace   # empty the playlist first, then add (cleans dupes)
+ytmusic-sync repush --dry-run   # preview the push
 ```
 
-Produces a structured JSON document — `{ exported_at, track_count, tracks: [{...}, ...] }` — with all 49 enrichment fields per track. Easier to feed into `jq`, dashboards, or other programmatic tools than the CSV.
+Reads every `spotify_uri` from `data/playlist_enriched.csv` and adds the missing ones in batches of 100. **No Spotify search calls** — uses the URIs already on disk, so it's fast. Idempotent by default: running it twice does not duplicate tracks, and a
+Spotify track two YT Music entries match is added once. `repush` exits with code 1 when tracks could not
+be added, or Spotify stopped answering. With `--replace`, a wipe that fails partway adds only what the
+playlist still lacks (it never doubles the playlist) and exits 1. Local files in the playlist are
+left in place: the API cannot remove them.
 
-## Skip filter & debug stats
+### JSON copies
+
+Every time the enriched CSV is written, a JSON copy with the same name is written beside it:
+`data/playlist_enriched.json` and, for likes, `data/likes_enriched.json`. Each is a structured
+document — `{ exported_at, track_count, tracks: [{...}, ...] }` — with every enrichment field per
+track, easier to feed into `jq`, dashboards or other tools than the CSV. To put a copy somewhere
+else, use menu **9** or:
+
+```bash
+ytmusic-sync export -o /tmp/my_data.json
+```
+
+### YT Music backup: export & import
+
+Works with only the YT Music login — no Spotify setup needed. Menu **12** exports, menu **13** imports.
+
+```bash
+ytmusic-sync export-yt --playlist liked     # Liked Songs
+ytmusic-sync export-yt --playlist <ID-or-link>
+ytmusic-sync export-yt --all                # Liked Songs + every playlist in your library
+```
+
+Each export is a JSON file (portable, re-importable) plus a CSV with the usual playlist columns, so
+it also works with **10 Use a CSV export**. Files go to `data/exports/` in the settings folder;
+`--all` writes one dated `backup-<date>` folder.
+
+```bash
+ytmusic-sync import-yt data/exports/<file>.json             # new private playlist, same name
+ytmusic-sync import-yt <file>.json --to <your-playlist>     # add what is missing to a playlist you own
+ytmusic-sync import-yt <ID-or-link> --new-name "My copy"    # copy a playlist directly, no file
+```
+
+Imports add tracks by YouTube video ID and skip ones the target already has, so an interrupted
+import can simply be run again (with `--to` and the new playlist's ID, which is printed right after
+it is created). New playlists are private unless you pass `--privacy unlisted|public`. To copy a
+playlist into another YT Music account, export it, switch the login (menu **C** → YT Music login),
+import, then switch back.
+
+### Skip filter & debug stats
 
 - **Skip filter**: YT Music tracks with no album metadata (typically YouTube uploads, fan edits, mixes) are filtered out before Spotify search and written to `data/skipped.csv` with `skip_reason=no_album`. Saves API time and keeps `unmatched.csv` focused on tracks that genuinely should match but didn't.
 - **Debug stats**: every `sync` run writes `data/debug/run_<timestamp>.json` (and a rolling `latest.json`) with totals, diff deltas, match rate, method distribution, average confidence, skip-reason histogram, and a few unmatched/skipped examples. Useful for graphing sync quality over time or feeding into a monitoring dashboard.
 
 ---
 
-## Known limitations
+## Known Limitations
 
-- **Spotify Developer Mode** limits search to 10 results per request and imposes a daily quota. Use `--limit N` to spread large initial syncs over multiple days.
-- **`/v1/audio-features`, `/v1/tracks`, `/v1/artists` blocked** — Spotify returns 403 on these endpoints for most standard (non-extended-access) app types since late 2024. Affected columns (`danceability`, `energy`, `valence`, `tempo`, `popularity`, `artist_genres`, …) stay empty unless your app passes Spotify's Extended Quota Mode review. The tool detects each 403, marks the relevant skip-flag, and stops retrying. **Sync still works** — Last.fm picks up the slack for genre/mood data.
-- **YT Music-exclusive tracks** (unreleased, region-locked, user uploads) will not have Spotify matches — these are tracked in `data/unmatched.csv`.
-- **ytmusicapi OAuth is broken** in v1.11.x — the tool uses browser-based authentication instead (stable, valid ~2 years).
-- **Last.fm tag coverage on niche music** — track-level tags (`lastfm_tags`) are user-submitted and sparse for game OSTs, regional uploads, and remix edits. Artist-level tags (`artist_tags`) are far denser; the tool prefers them and falls back to track-level only for play-count/listener data.
+These are YT Music, Spotify and Last.fm platform constraints — not tool limitations:
+
+| Data | Status | Notes |
+|---|---|---|
+| Spotify developer app | Premium required | Since February 2026 Spotify runs Development Mode apps only while the app owner has Premium, and new apps allow up to 5 users |
+| Spotify search | Rate-limited | Development Mode apps get 10 results per request and a daily quota. Use `--limit N` to spread a large first sync over several days |
+| Audio features, popularity, artist genres | Usually empty | `/v1/audio-features`, `/v1/tracks` and `/v1/artists` return 403 for standard (non-extended-access) apps since late 2024. The tool detects each 403, marks the skip-flag and stops retrying; sync still works and Last.fm fills genre/mood |
+| YT Music-exclusive tracks | Not matchable | Unreleased, region-locked and user-uploaded tracks have no Spotify equivalent; they are listed in `data/unmatched.csv` |
+| YT Music login | Browser headers only | ytmusicapi OAuth is broken in v1.11.x, so the tool uses browser-header auth (valid ~2 years, ends if you log out of YT Music in that browser) |
+| Liked Songs endpoint | Best-effort | YT Music sometimes serves a signed-out page for the Liked Music (`LM`) endpoint even when playlists work; the tool explains how to refresh the login |
+| Last.fm track tags | Sparse on niche music | Track-level tags are user-submitted and thin for game OSTs, regional uploads and remix edits; artist-level tags are preferred |
+| YT Music import | Video IDs only | Only rows with a YouTube video ID can be imported (rows that came from Spotify have none); unavailable or region-locked videos are reported, not added |
+
+---
+
+## Project Structure
+
+```
+ytmusic-to-spotify-sync/
+├── playlist_sync.py           # Entry point for git clones (same as the ytmusic-sync command)
+├── .env.example               # Settings template (the wizard writes .env for you; .env is gitignored)
+├── requirements.txt           # Python dependencies
+├── pyproject.toml             # Packaging; console script ytmusic-sync
+│
+├── playlist_sync/
+│   ├── __init__.py            # Package version (canonical version source)
+│   ├── cli.py                 # Subcommands (argparse) and console-script entry point
+│   ├── menu.py                # Interactive menu and setup wizard
+│   ├── yt_transfer.py         # YT Music export (JSON + CSV) and import
+│   ├── config.py              # Settings folder, .env loading/writing, validation
+│   ├── models.py              # Track, MatchResult, DiffResult dataclasses
+│   ├── utils.py               # Text normalisation and logging setup
+│   ├── csv_manager.py         # CSV I/O (BOM-aware)
+│   ├── ytmusic_client.py      # YT Music API wrapper and login-header parsing
+│   ├── spotify_client.py      # Spotify API wrapper with rate-limit handling
+│   ├── matcher.py             # 3-pass track matching engine
+│   ├── differ.py              # Snapshot diff engine
+│   ├── enricher.py            # Metadata, audio features, classification
+│   └── lastfm_client.py       # Last.fm API wrapper (track + artist endpoints)
+│
+├── tests/                     # Offline pytest suite (no network, fakes for all APIs)
+│
+└── data/                      # Created at runtime in the settings folder (gitignored)
+    ├── snapshots/             # JSON snapshots
+    ├── playlist_enriched.csv  # Full enriched output (+ playlist_enriched.json copy)
+    ├── exports/               # YT Music exports (export-yt)
+    ├── review.csv             # Low-confidence matches worth a manual check
+    ├── match_cache.json       # Matches of a stopped run not yet added to Spotify
+    ├── enriched_source.json   # Which source playlist_enriched.csv was synced from
+    └── unmatched.csv          # Tracks that could not be matched
+```
+
+---
+
+## Configuration Reference
+
+The setup wizard writes these to `.env` in the settings folder; you can also edit `.env` by hand
+or set them as environment variables (real environment variables win over `.env`). Values still
+reading `your_..._here` from the template count as not set.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SPOTIPY_CLIENT_ID` | Yes | — | Spotify app Client ID ([dashboard](https://developer.spotify.com/dashboard)) |
+| `SPOTIPY_CLIENT_SECRET` | Yes | — | Spotify app client secret |
+| `SPOTIPY_REDIRECT_URI` | No | `http://127.0.0.1:8888/callback` | OAuth redirect URI; must match the app settings exactly |
+| `SPOTIFY_PLAYLIST_ID` | Yes* | — | Target Spotify playlist — ID or full `open.spotify.com` link (*not needed for `sync-likes`) |
+| `YTMUSIC_PLAYLIST_ID` | Yes* | — | Source YT Music playlist — ID or full `...playlist?list=<ID>` link (*not needed with `--from-csv`) |
+| `YTMUSIC_AUTH_FILE` | No | `browser.json` | YT Music login file; relative paths are inside the settings folder |
+| `SOURCE_CSV` | No | — | CSV export to use instead of the live API; relative paths are inside the settings folder |
+| `LASTFM_API_KEY` | No | — | Free key from [last.fm/api/account/create](https://www.last.fm/api/account/create) — play counts, listeners, artist tags |
+| `PLAYLIST_SYNC_HOME` | No | see [Where your settings live](#where-your-settings-live) | Settings folder override; set it in the environment, not in `.env` (created if missing) |
 
 ---
 
 ## Requirements
 
-- Python 3.10+
-- [Spotify Developer account](https://developer.spotify.com/dashboard) (free)
+- Python **3.10+**
+- Spotify account with **Premium** for the developer app ([dashboard](https://developer.spotify.com/dashboard)); not needed for the YT Music backup features
 - YouTube Music account
-
-```
-pandas>=2.0.0
-spotipy>=2.24.0
-ytmusicapi>=1.8.0
-python-dotenv>=1.0.0
-tqdm>=4.66.0
-```
+- [`pandas`](https://pypi.org/project/pandas/) >= 2.0, [`spotipy`](https://pypi.org/project/spotipy/) >= 2.26,
+  [`ytmusicapi`](https://pypi.org/project/ytmusicapi/) >= 1.8,
+  [`python-dotenv`](https://pypi.org/project/python-dotenv/) >= 1.2.3, [`tqdm`](https://pypi.org/project/tqdm/) >= 4.66
 
 ---
 
-## Changelog & Contributing
+## Changelog
 
-- [CHANGELOG.md](CHANGELOG.md) — full version history
-- [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, semver policy, two-file update rule
+See [CHANGELOG.md](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/CHANGELOG.md) for the full version history.
 
----
+## Contributing
+
+See [CONTRIBUTING.md](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/CONTRIBUTING.md) for the versioning policy and development setup. In short:
+no secrets in the repo, `ruff check .` and `pytest -q` must pass, ASCII-only console output,
+test against your own non-production playlists.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/LICENSE)
