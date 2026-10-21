@@ -27,7 +27,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff
+          # ruff pinned: new releases widen the default rules and would fail
+          # unrelated PRs; bump it deliberately (also in pyproject's [dev] extra)
+          pip install "ruff==0.17.1" pytest
 
       - name: Lint with ruff
         run: ruff check .
@@ -40,3 +42,10 @@ jobs:
           python -c "from playlist_sync.models import Track, MatchResult, DiffResult"
           python -c "from playlist_sync.matcher import match_track"
           python -c "from playlist_sync.differ import diff_tracks"
+          python -c "from playlist_sync.menu import interactive_menu, run_setup_wizard"
+
+      - name: Run offline tests
+        run: pytest -q
+
+      - name: CLI help
+        run: python playlist_sync.py --help

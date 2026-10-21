@@ -14,10 +14,11 @@ Thank you for considering a contribution to **ytmusic-to-spotify-sync**!
 
 1. Fork the repository and create a feature branch from `master`.
 2. Make your changes and verify they work end-to-end.
-3. Run the linter and ensure it passes before pushing:
+3. Run the linter and the offline tests and ensure both pass before pushing:
    ```bash
-   pip install ruff
+   pip install -e ".[dev]"
    ruff check .
+   pytest -q
    ```
 4. Open a PR using the provided template and fill in all sections.
 
@@ -51,18 +52,21 @@ PRs that change behaviour without bumping the version and updating the changelog
 ## Development setup
 
 ```bash
-# Clone and install dependencies
+# Clone and install (editable, with test tools)
 git clone https://github.com/davidmalko87/ytmusic-to-spotify-sync.git
 cd ytmusic-to-spotify-sync
-pip install -r requirements.txt
+pip install -e ".[dev]"
 
 # Verify the entry point loads
 python -c "import playlist_sync; print(playlist_sync.__version__)"
 
-# Run the linter
-pip install ruff
+# Lint and run the offline test suite (no network, no real accounts)
 ruff check .
+pytest -q
 ```
+
+An editable install still keeps `.env`, `browser.json` and `data/` in the repo
+folder; set `PLAYLIST_SYNC_HOME` to use a separate settings folder for testing.
 
 ## Code style
 

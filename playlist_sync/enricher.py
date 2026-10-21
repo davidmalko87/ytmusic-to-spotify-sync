@@ -497,9 +497,9 @@ def backfill_lastfm_artist_tags(
     # Also mark artists that didn't even respond (404 / network failure)
     # so we eventually stop hammering them. They can be retried by clearing
     # the lastfm_attempted column manually.
-    for artist_name in artist_to_tracks:
+    for artist_name, artist_tracks in artist_to_tracks.items():
         if artist_name not in artist_data:
-            for t in artist_to_tracks[artist_name]:
+            for t in artist_tracks:
                 t.lastfm_attempted = True
 
     logger.info(

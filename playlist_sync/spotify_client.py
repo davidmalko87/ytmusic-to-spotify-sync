@@ -7,21 +7,40 @@ Version: 0.1.0
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import shutil
 import time
 
 import spotipy
-from tqdm import tqdm
 from spotipy.oauth2 import SpotifyOAuth
+from tqdm import tqdm
 
 from playlist_sync.config import (
+    LEGACY_TOKEN_CACHE,
     SEARCH_DELAY_SEC,
     SPOTIFY_PLAYLIST_BATCH,
     SPOTIFY_SEARCH_LIMIT,
+    SPOTIFY_TOKEN_CACHE,
+    make_private,
 )
 
 logger = logging.getLogger("playlist_sync")
+
+
+def _adopt_legacy_token_cache() -> None:
+    """Keep 0.7.x users logged in: their token lived in a file named '.cache'."""
+    if SPOTIFY_TOKEN_CACHE.exists() or not LEGACY_TOKEN_CACHE.is_file():
+        return
+    try:
+        token = json.loads(LEGACY_TOKEN_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # some other tool's '.cache' file, not a spotipy token
+    if isinstance(token, dict) and "refresh_token" in token:
+        shutil.copy2(LEGACY_TOKEN_CACHE, SPOTIFY_TOKEN_CACHE)
+        make_private(SPOTIFY_TOKEN_CACHE)
+        logger.info("Copied Spotify token cache %s -> %s", LEGACY_TOKEN_CACHE, SPOTIFY_TOKEN_CACHE)
 
 
 def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
@@ -37,17 +56,65 @@ def get_spotify_client(config: dict[str, str]) -> spotipy.Spotify:
         "playlist-modify-public playlist-modify-private playlist-read-private "
         "user-library-read user-library-modify"
     )
+    _adopt_legacy_token_cache()
     auth_manager = SpotifyOAuth(
         client_id=config["SPOTIPY_CLIENT_ID"],
         client_secret=config["SPOTIPY_CLIENT_SECRET"],
         redirect_uri=config["SPOTIPY_REDIRECT_URI"],
         scope=scope,
+        # Pin the token cache to the settings folder; spotipy's default is the CWD
+        cache_path=str(SPOTIFY_TOKEN_CACHE),
     )
     sp = spotipy.Spotify(auth_manager=auth_manager, requests_timeout=30, retries=3)
 
     user = sp.current_user()
     logger.info("Authenticated as Spotify user: %s", user.get("display_name", user["id"]))
     return sp
+
+
+def list_my_playlists(sp: spotipy.Spotify) -> list[dict[str, str]]:
+    """Return playlists the current user can add tracks to, as {id, name, count}."""
+    me = sp.current_user()["id"]
+    playlists: list[dict[str, str]] = []
+    page = sp.current_user_playlists(limit=50)
+    while page:
+        for item in page.get("items") or []:
+            if not item or not item.get("id"):
+                continue
+            owner = (item.get("owner") or {}).get("id")
+            if owner != me and not item.get("collaborative"):
+                continue  # followed playlists are read-only for us
+            # Newer API responses describe the contents under "items" instead of "tracks"
+            contents = item.get("tracks") or item.get("items") or {}
+            total = contents.get("total") if isinstance(contents, dict) else None
+            playlists.append({
+                "id": item["id"],
+                "name": item.get("name") or item["id"],
+                "count": "" if total is None else str(total),
+            })
+        page = sp.next(page) if page.get("next") else None
+    return playlists
+
+
+def create_playlist(sp: spotipy.Spotify, name: str, description: str = "") -> dict[str, str]:
+    """Create a private playlist for the current user and return {id, name}."""
+    created = sp.current_user_playlist_create(name, public=False, description=description)
+    return {"id": created["id"], "name": created.get("name") or name}
+
+
+def get_playlist_access(sp: spotipy.Spotify, playlist_id: str) -> dict[str, object]:
+    """Return {name, can_edit} for a playlist; raises spotipy.SpotifyException if unreachable.
+
+    Only the owner (or anyone, for collaborative playlists) may add tracks, the
+    same rule list_my_playlists applies.
+    """
+    info = sp.playlist(playlist_id, fields="name,owner(id),collaborative")
+    me = sp.current_user()["id"]
+    owner = (info.get("owner") or {}).get("id")
+    return {
+        "name": info.get("name") or playlist_id,
+        "can_edit": owner == me or bool(info.get("collaborative")),
+    }
 
 
 class RateLimitError(Exception):
@@ -114,12 +181,14 @@ def get_track_details(sp: spotipy.Spotify, track_id: str) -> dict | None:
 def get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict]:
     """Fetch all tracks from a Spotify playlist (handles pagination)."""
     tracks: list[dict] = []
-    results = sp.playlist_tracks(playlist_id)
+    results = sp.playlist_items(playlist_id, additional_types=("track",))
 
     while results:
         for item in results.get("items", []):
-            track = item.get("track")
-            if track:
+            # Spotify's 2026 API renamed each entry's "track" to "item"; accept both
+            # so repush never mistakes a full playlist for an empty one.
+            track = item.get("item") or item.get("track")
+            if track and track.get("type", "track") == "track":
                 tracks.append(track)
 
         if results.get("next"):
