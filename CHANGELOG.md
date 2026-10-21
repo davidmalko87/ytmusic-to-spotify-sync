@@ -16,7 +16,8 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 - **Playlist links accepted everywhere**: full YT Music / YouTube / Spotify links, in the wizard or in `.env`, are reduced to IDs.
 - **Friendlier YT Music login.** Accepts DevTools "Copy as cURL" (bash or cmd), the Chrome two-line format and raw headers. It explains in plain words why a paste failed (single line, missing `cookie` or `authorization`, selection started mid-cookie) and asks again. The new login is checked with YT Music before it replaces the old `browser.json`, and the temporary file is always removed.
 - **`PLAYLIST_SYNC_HOME`** environment variable to choose the settings folder (created if missing).
-- **Offline pytest suite** (`tests/`, 138 tests: the wizard and menu driven by scripted keystrokes, end-to-end sync integrity with fake APIs, export/import). Runs in CI together with a `--help` smoke test.
+- **`lastfm --retry-missing`** re-checks rows that older versions marked as attempted but that still have no Last.fm data (no `lastfm_playcount`, or no `artist_tags`). Before 0.8.0, failed requests, `+` artists and duplicate rows all got the skip-flag, so plain runs never retried them. The flag applies the Last.fm fixes below to an existing `playlist_enriched.csv` without rebuilding it, so its Spotify enrichment is kept, and rows that already have data are not touched. A retried row's flag reflects only this run's answer: found or "not found" sets it, and a failed request clears it so the next plain run retries the row. Plain `lastfm` runs print how many flagged rows still lack data and point to the flag. On a real 3,600-track library, `--retry-missing --dry-run` found 404 tracks for track data and 135 tracks (92 artists) for artist tags.
+- **Offline pytest suite** (`tests/`: the wizard and menu driven by scripted keystrokes, end-to-end sync integrity with fake APIs, export/import, Last.fm encoding and error handling, backfill retry and duplicate fan-out, genre/mood classification on real-looking tag pools). Runs in CI together with a `--help` smoke test.
 
 ### Fixed
 - **`.env.example` placeholder values are no longer treated as real.** `snapshot` / `diff` / `sync` with `YTMUSIC_PLAYLIST_ID=your_playlist_id_here` used to fail inside ytmusicapi with `Unable to find 'contents' ...`. They now stop with a clear message pointing to the setup wizard. The same goes for the Spotify keys, the Spotify playlist and the Last.fm key.
@@ -35,6 +36,13 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 - The default redirect URI is `http://127.0.0.1:8888/callback` (Spotify rejects `localhost`), matching `.env.example`.
 - A non-ASCII playlist title no longer crashes a run whose output is redirected (cron, Jenkins, Git Bash) or a menu prompt.
 - `.env` and `browser.json` are owner-only on Linux/macOS after every write.
+- **Last.fm enrichment accuracy**:
+  - **Artists with `+` in the name now get Last.fm data.** Last.fm URL-decodes query values twice, so a correctly encoded `+` (`%2B`) arrived as a space: `Sultan + Shepard` was looked up as `Sultan   Shepard`, a ghost entry with no tags (372 listeners instead of 217,571). The client now encodes `+` once more (`%252B`) in every artist and track name. This affected every name with `+`, e.g. `Florence + The Machine`.
+  - **Post-punk and hardcore no longer land in `punk`.** `post-punk` (and `post-punk revival`) moved to the `rock` bucket. A tag that is itself a bucket keyword now counts only for that bucket, so `post-punk` can't match `punk` through its words (SadSvit, Кино). Bare `hardcore` was dropped from `punk`: `hardcore punk` and `post-hardcore` stay, and `happy hardcore`, `hardstyle`, `gabber` and `speedcore` are `electronic`. A `punk` tag that ranks below a tag of an unrelated genre no longer decides the genre (Thylacine: `electronic, french, punk, ...` is `electronic`). On a real 3,600-track library, `punk` went from 91 tracks to 26.
+  - **YouTube channel uploads no longer borrow a namesake's tags.** For YT Music tracks without an album, the "artist" is usually the uploading channel, and `artist.getInfo` returned whoever else has that name (`Arrakis` came back as metal, `Electronic Arts` as jazz). These tracks are no longer looked up, and their stored artist tags are ignored when classifying. The exception is an artist who also has album tracks in the library or is named in the title (`Guru Josh - Infinity 2012`).
+  - **Failed Last.fm requests are retried instead of written off.** Network errors, HTTP failures, rate limits and other API errors used to set `lastfm_track_attempted` / `lastfm_attempted` as if Last.fm had said "not found". Only a real "not found" (Last.fm error 6) sets the flag now. A batch that stops early after 50 consecutive failures no longer marks the tracks it never queried.
+  - **Duplicate tracks all get their play counts.** When the same artist + title appeared more than once, only one copy received the Last.fm data and the others were marked attempted with nothing (345 rows on a real 3,600-track library). One lookup now fills every copy, and duplicate pairs are queried once.
+  - Existing non-zero `lastfm_playcount` / `lastfm_listeners` and non-empty `lastfm_tags` are never overwritten with `0` or empty values.
 
 ### Changed
 - Menu numbers changed (see README).
@@ -42,6 +50,13 @@ This project follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PA
 - `.env` is re-read on every menu redraw, so hand edits show up; real environment variables still win over `.env`.
 - `setup-ytmusic` exits with code 1 when no login was saved.
 - `python-dotenv>=1.2.3` (earlier versions lost backslashes in values such as Windows paths when writing `.env`).
+- **New mood label `acoustic`** (a character marker like `instrumental`) for tracks tagged `acoustic`, `unplugged`, `indie folk`, `chamber folk` or the whole tag `folk` (not `folk metal` / `folk punk`). Calm folk acts whose top tags carry no mood word (Daughter, Agnes Obel, Pomme, Of Monsters and Men, Low Roar) now get one. Also new: `dream pop` → `dreamy`; `peaceful`, `gentle`, `laid back`, `lullaby` → `chill`; `sadcore` → `sad`. On the real library, filled `mood` went from 702 to 1,037 tracks.
+- `lastfm` command counts now match what is actually fetched (channel uploads are left out of the artist-tag count).
+
+### Migration note
+Rows enriched by earlier versions keep their old skip-flags and classifications. To apply the Last.fm fixes to an existing `playlist_enriched.csv`:
+- **Genre / mood only:** run `classify --force` (no API calls). This re-buckets punk/post-punk and drops namesake-based genres for channel uploads.
+- **Missing Last.fm data** (`+` artists, failed requests, duplicate rows): run `lastfm --retry-missing` (add `--dry-run` first to see the counts).
 
 ---
 

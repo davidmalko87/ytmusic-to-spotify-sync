@@ -51,6 +51,8 @@ from playlist_sync.enricher import (
     backfill_track_metadata,
     classify_all_tracks,
     enrich_with_audio_features,
+    lastfm_artist_tag_candidates,
+    lastfm_track_candidates,
 )
 from playlist_sync.matcher import match_track
 from playlist_sync.models import Track
@@ -791,16 +793,30 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
         tracks = snapshot_tracks
         print(f"Loaded {len(tracks)} tracks from latest snapshot")
 
-    needs_track_data = [
-        t for t in tracks
-        if not t.lastfm_playcount and t.title and t.artist and not t.lastfm_track_attempted
-    ]
-    needs_artist_tags = [
-        t for t in tracks
-        if not t.artist_tags and t.artist and not t.lastfm_attempted
-    ]
+    # --retry-missing: rows flagged attempted by versions before 0.8.0 (failed
+    # requests, '+' artists, duplicate rows) still have no data; give them
+    # one fresh lookup.
+    retry_missing = getattr(args, "retry_missing", False)
+    needs_track_data = lastfm_track_candidates(tracks, ignore_attempted=retry_missing)
+    needs_artist_tags = lastfm_artist_tag_candidates(tracks, ignore_attempted=retry_missing)
     print(f"Need Last.fm track data: {len(needs_track_data)}")
     print(f"Need Last.fm artist tags: {len(needs_artist_tags)}")
+
+    if retry_missing:
+        print(f"  incl. previously attempted (--retry-missing): "
+              f"{sum(1 for t in needs_track_data if t.lastfm_track_attempted)} track data, "
+              f"{sum(1 for t in needs_artist_tags if t.lastfm_attempted)} artist tags")
+    else:
+        flagged_tracks = (
+            len(lastfm_track_candidates(tracks, ignore_attempted=True)) - len(needs_track_data)
+        )
+        flagged_artists = (
+            len(lastfm_artist_tag_candidates(tracks, ignore_attempted=True))
+            - len(needs_artist_tags)
+        )
+        if flagged_tracks or flagged_artists:
+            print(f"Skipping {flagged_tracks} track-data and {flagged_artists} artist-tag row(s) "
+                  f"already attempted without data (use 'lastfm --retry-missing' to retry).")
 
     if not needs_track_data and not needs_artist_tags:
         print("All tracks already have Last.fm data and artist tags.")
@@ -814,11 +830,11 @@ def cmd_lastfm(args: argparse.Namespace) -> None:
 
     if needs_track_data:
         print("\nFetching Last.fm track data (playcount, listeners, track tags)...")
-        backfill_lastfm_data(lastfm_key, tracks)
+        backfill_lastfm_data(lastfm_key, tracks, ignore_attempted=retry_missing)
 
     if needs_artist_tags:
         print("\nFetching Last.fm artist tags (denser genre coverage)...")
-        backfill_lastfm_artist_tags(lastfm_key, tracks)
+        backfill_lastfm_artist_tags(lastfm_key, tracks, ignore_attempted=retry_missing)
 
     print("\nClassifying genre and mood from tag pool...")
     classify_all_tracks(tracks)
@@ -1333,6 +1349,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_lastfm = sub.add_parser("lastfm", help="Enrich matched tracks with Last.fm data")
     p_lastfm.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_lastfm.add_argument(
+        "--retry-missing", action="store_true",
+        help="Also retry tracks already marked attempted that still have no Last.fm data "
+             "(one-off fix for CSVs enriched before 0.8.0)",
+    )
 
     p_classify = sub.add_parser("classify", help="Derive primary_genre and mood from existing tags (no API calls)")
     p_classify.add_argument("--dry-run", action="store_true", help="Preview without writing")
