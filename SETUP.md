@@ -171,7 +171,8 @@ ytmusic-sync sync --from-csv my_playlist.csv   # sync it to Spotify
 ```
 
 Expected CSV columns: `title, artist, album, trackId, duration, url`
-(at minimum `title` and `artist` are required).
+(at minimum `title` and `artist` are required). An optional `isrc` column turns on the exact
+ISRC match, which the YT Music API cannot provide.
 
 ## Troubleshooting
 

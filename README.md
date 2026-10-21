@@ -9,13 +9,14 @@
 [![Last.fm](https://img.shields.io/badge/Last.fm-enrichment-D51007.svg?logo=lastdotfm&logoColor=white)](https://www.last.fm/api)
 [![Setup](https://img.shields.io/badge/setup-guided%20wizard-success.svg)](#1-configure--setup-wizard)
 [![Source](https://img.shields.io/badge/source-YT%20Music%20API%20%7C%20CSV%20export-success.svg)](#configuration-reference)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
 [![Last commit](https://img.shields.io/github/last-commit/davidmalko87/ytmusic-to-spotify-sync.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/commits/master)
 [![GitHub issues](https://img.shields.io/github/issues/davidmalko87/ytmusic-to-spotify-sync.svg)](https://github.com/davidmalko87/ytmusic-to-spotify-sync/issues)
 
 Keep a **YouTube Music playlist in sync with Spotify**: the tool reads the playlist through the
-**YT Music API**, finds each track on **Spotify** with **3-pass ISRC / title / fuzzy matching**,
+**YT Music API**, finds each track on **Spotify** with **title + artist / fuzzy matching** (plus an
+exact ISRC pass for CSV exports that carry ISRCs),
 pushes only what changed, and enriches every track with **Spotify and Last.fm metadata**. It also
 **exports and imports YT Music playlists and Liked Songs** (JSON + CSV) without Spotify.
 Fully resumable, with a **guided setup wizard**, an interactive menu and CLI mode.
@@ -35,7 +36,7 @@ YouTube Music and Spotify don't talk to each other. If you curate playlists on o
 | **Guided setup wizard** | Asks for the YT Music login, both playlists, the Spotify app keys and the optional Last.fm key, checks each one live and saves it to `.env` — no manual file editing |
 | **Playlist pickers** | Choose the YT Music source from your library and the Spotify target from your playlists (or let it create one); pasted links work too |
 | **Live YT Music API** | Fetches your playlist directly via `ytmusicapi` — no manual export required |
-| **3-pass smart matching** | ISRC exact match → normalised title + artist → fuzzy fallback with duration validation |
+| **3-pass smart matching** | Normalised title + artist → fuzzy fallback, both validated by duration; an exact ISRC match runs first for CSV exports with an `isrc` column (the YT Music API has no ISRCs) |
 | **Diff-based sync** | JSON snapshots track playlist state; only added/removed tracks are touched each run |
 | **Spotify playlist management** | Adds new matches and removes deleted tracks automatically |
 | **Liked Songs sync** | Mirrors YT Music likes into Spotify **Liked Songs** |
@@ -269,9 +270,12 @@ YT Music Playlist ──(API or CSV)──> Current State
 
 ### Track matching strategy
 
-The matcher runs three passes in order of reliability:
+The matcher runs up to three passes in order of reliability:
 
-1. **ISRC match** — searches Spotify by `isrc:` query; highest accuracy, ~95 % confidence
+1. **ISRC match** — only for tracks that carry an ISRC, i.e. from a CSV export with an `isrc`
+   column (`sync --from-csv`, or `import-csv` before the first sync). The YT Music API returns no
+   ISRCs, so playlists and Liked Songs read from it start at pass 2. Searches Spotify by `isrc:`;
+   highest accuracy, confidence 0.95–1.0
 2. **Title + Artist** — normalised search (`feat.` stripped, HTML decoded), validated by duration ± 5 s
 3. **Relaxed** — title-only search with fuzzy artist matching; catches live versions and alternate releases
 
@@ -286,7 +290,8 @@ The sync produces `data/playlist_enriched.csv` with **50 columns**:
 | Column | Source |
 |---|---|
 | `title`, `artist`, `album` | YT Music |
-| `trackId`, `url`, `duration` | YT Music |
+| `platform`, `trackId`, `url`, `duration` | YT Music (`platform` is `ytmusic`, or the CSV export's own value) |
+| `addedDate`, `addedBy` | Copied from a CSV export that has them; empty for the YT Music API |
 | `spotify_uri`, `spotify_url`, `spotify_duration_ms` | Spotify match |
 | `isrc`, `isrc_enriched`, `explicit`, `album_release_date` | Spotify metadata |
 | `popularity` | Spotify track popularity (0–100) — only with extended-access apps |
@@ -494,14 +499,14 @@ reading `your_..._here` from the template count as not set.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+See [CHANGELOG.md](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/CHANGELOG.md) for the full version history.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the versioning policy and development setup. In short:
+See [CONTRIBUTING.md](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/CONTRIBUTING.md) for the versioning policy and development setup. In short:
 no secrets in the repo, `ruff check .` and `pytest -q` must pass, ASCII-only console output,
 test against your own non-production playlists.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/davidmalko87/ytmusic-to-spotify-sync/blob/master/LICENSE)

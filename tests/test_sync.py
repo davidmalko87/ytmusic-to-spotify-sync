@@ -197,3 +197,39 @@ def test_rate_limited_push_loses_nothing(world: FakeWorld) -> None:
     sync()
     assert len(world.playlist) == 5
     assert world.match_calls == calls_before  # pushed from the cache, nothing searched again
+
+
+def test_nothing_to_do_exit_keeps_every_row(world: FakeWorld, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every track fails once; the next sync has nothing to search and takes the
+    # quiet "Nothing new to match" exit, which must still keep all rows.
+    monkeypatch.setattr(cli, "match_track", lambda sp, track: MatchResult(source_track=track))
+    sync()
+    sync()
+    rows = read_enriched_csv()
+    assert len(rows) == 5 and all(t.match_attempted for t in rows)
+
+
+def test_csv_from_before_0_7_1_is_searched_once_then_skipped(
+    world: FakeWorld, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CHANGELOG 0.7.1 once claimed an automatic match_attempted migration; there
+    # is none. Old rows are searched once, flagged, and skipped afterwards.
+    import pandas as pd
+
+    rows = [yt_track(n) for n in range(1, 4)]
+    cfg.ENRICHED_CSV.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{k: v for k, v in t.to_csv_row().items() if k != "match_attempted"}
+                  for t in rows]).to_csv(cfg.ENRICHED_CSV, index=False, encoding="utf-8-sig")
+    world.yt = rows
+    searched: list[str] = []
+
+    def never_matches(sp: object, track: Track) -> MatchResult:
+        searched.append(track.track_id)
+        return MatchResult(source_track=track, error="No Spotify match found after all passes")
+
+    monkeypatch.setattr(cli, "match_track", never_matches)
+    assert not any(t.match_attempted for t in read_enriched_csv())
+    sync()
+    assert len(searched) == 3 and all(t.match_attempted for t in read_enriched_csv())
+    sync()
+    assert len(searched) == 3

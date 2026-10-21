@@ -400,6 +400,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     already_matched: list[Track] = []
     skipped_tracks: list[Track] = []
     previously_failed: list[Track] = []   # tracks where matcher already gave up
+    unmatched_tracks: list[Track] = []    # searched this run, no match (rows_to_keep needs it early)
 
     retry_unmatched_now = getattr(args, "retry_unmatched", False)
 
@@ -508,7 +509,6 @@ def cmd_sync(args: argparse.Namespace) -> None:
     # Step 6: Match new tracks (with resume support)
     sp = get_spotify_client(config)
     matched_results = []
-    unmatched_tracks: list[Track] = []
 
     if needs_matching:
         # Skip tracks already in cache from previous interrupted run

@@ -80,7 +80,7 @@ Rows enriched by earlier versions keep their old skip-flags and classifications.
 - Enriched CSV grew to **50 columns** (was 49): added `match_attempted`.
 
 ### Migration note
-Existing CSVs are auto-migrated: every track currently in `playlist_enriched.csv` is treated as already-attempted, so the next sync will skip the persistent failures immediately. New tracks added to the YT Music playlist after upgrade start with `match_attempted=False` and get processed normally.
+There is no automatic migration (an earlier version of this note said there was; corrected in 0.8.0). A `playlist_enriched.csv` written before 0.7.1 has no `match_attempted` column, so its unmatched rows load as not yet attempted: the first sync after upgrading searches them once more and flags the ones that still fail, and later syncs skip them. Already-matched tracks are not searched again. To spread that one-time search over several days, use `sync --limit N`.
 
 ---
 
